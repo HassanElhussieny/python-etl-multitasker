@@ -1,0 +1,44 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Sensitive configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Business data and generated reports
+data/
+input/
+output/
+processed/
+backups/
+duplicates/
+failures/
+state/
+
+# Business files
+*.csv
+*.xlsx
+*.xls
+*.xlsm
+
+# Unreviewed test samples
+tests/fixtures/
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
