@@ -462,15 +462,16 @@ def test_structure_and_formatting(tmp_path, setup):
     sectors = [r[1] for r in wb[SHEET_SECTORS].iter_rows(min_row=3, values_only=True)]   # date line, header; م first
     assert sectors == [*SECTORS, UNREGISTERED, GRAND_TOTAL] and len(SECTORS) == 8
     reps = [r[1] for r in wb[SHEET_REPS].iter_rows(min_row=3, values_only=True)]
-    assert reps == [*GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", UNREGISTERED,
+    assert reps == [*GROUP_ONE, "د هاني", "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", UNREGISTERED,
                     "إجمالي المجموعة الثالثة", GRAND_TOTAL]                     # Cover order and groups
     assert sorted(GROUP_ONE + GROUP_TWO) == sorted(REPORT_REPRESENTATIVES) and len(REPORT_REPRESENTATIVES) == 16
     assert len(REPRESENTATIVES) == 17 and "دينا كرم ابراهيم" not in reps                  # excluded from Task 5
     for ws in wb.worksheets[:3]:                                       # Master Data: its own test
         assert ws.sheet_view.rightToLeft and ws.freeze_panes == "A3"
         assert ws.cell(row=1, column=1).value == "تاريخ التقرير: 30/10/2026"
-        header = ws.cell(row=2, column=1)
-        assert header.fill.fgColor.rgb.endswith("1F4E78") and header.font.name == "Segoe UI" and header.font.bold
+        header = ws.cell(row=2, column=1)                              # black-and-white print design
+        assert header.fill.fgColor.rgb.endswith("BFBFBF") and header.font.name == "Segoe UI" and header.font.bold
+        assert header.font.color.rgb.endswith("000000")                # medium grey, black text: clear on B&W
         last = ws.max_row
         assert ws.cell(row=last, column=2).value == GRAND_TOTAL and ws.cell(row=last, column=2).font.bold
         assert ws.auto_filter.ref.endswith(str(last - 1))                         # total row outside the filter
@@ -480,17 +481,21 @@ def test_structure_and_formatting(tmp_path, setup):
             if isinstance(cell.value, (int, float)):
                 assert cell.number_format == ("#,##0" if is_count else "#,##0.00")
                 assert not str(cell.value).startswith("=")
-            assert ws.column_dimensions[cell.column_letter].width >= 12
+            assert ws.column_dimensions[cell.column_letter].width >= _content_width(ws, col)   # nothing cut off
         assert all(isinstance(v, str) and v.isascii() is False
                    for v in next(ws.iter_rows(min_row=2, max_row=2, values_only=True)))
     assert wb[SHEET_SECTORS].cell(row=4, column=1).fill.fgColor.rgb.endswith("F2F2F2")   # striped rows
 
 
-def test_no_missing_customers_sheet_has_only_grand_total(tmp_path):
+def test_no_missing_customers_sheet_shows_a_note_and_no_unregistered_rows(tmp_path):
     write_erp_csv(tmp_path / "input" / "m.csv", [row("30-10-2026", S, "5.00", 100001)])
     result = run_analysis(_config(tmp_path), MODE_ALL, None, load_main_data(write_main(tmp_path / "main.xlsx")))
-    assert _sheets(result.report_path)[SHEET_MISSING][1:] == [[GRAND_TOTAL, None, *_d("0", "0", "0")]]
-    assert _by_label(_sheets(result.report_path)[SHEET_SECTORS])[UNREGISTERED] == _d("0", "0", "0")
+    assert analysis.verify_analysis_report(result) == []
+    report = _sheets(result.report_path)
+    assert report[SHEET_MISSING][1:] == [["لا يوجد عملاء غير مسجلين في بيانات هذا التقرير", None, None, None, None]]
+    assert UNREGISTERED not in _by_label(report[SHEET_SECTORS]) and UNREGISTERED not in _by_label(report[SHEET_REPS])
+    assert "إجمالي المجموعة الثالثة" not in _by_label(report[SHEET_REPS])
+    assert _by_label(report[SHEET_SECTORS])[GRAND_TOTAL] == _d("5.00", "0", "5.00")
 
 
 def test_reconcile_detects_mismatch(tmp_path, setup):
@@ -1006,8 +1011,9 @@ GROUP_ONE = ["اون لاين", "الاداره", "هند محمد رضا", "ا�
              "داليا صلاح الدين فكر", "سميرة محمد اسماعيل", "محمود الشيمي", "ندا عبد الناصر طه"]
 GROUP_TWO = ["هشام احمد محمد", "ابراهيم سلام", "رامي رأفت يوقيم", "محمد رأفت شحاتة محمد", "احمد محمد علام محمد",
              "احمد محمود موسي", "احمد الحريري"]
-REP_SHEETS = [*GROUP_ONE, *GROUP_TWO, "غير مسجل"]   # the representative sheets, in Cover order (no extra names here)
-COVER_GROUP_ONE = [*GROUP_ONE[:8], "د هاني", GROUP_ONE[8]]   # Cover: د هاني in المباشر, after محمود الشيمي
+COVER_GROUP_ONE = [*GROUP_ONE, "د هاني"]   # المباشر: the fixed list, then د هاني right above إجمالي المباشر
+REP_SHEETS = [*COVER_GROUP_ONE, *GROUP_TWO, "غير مسجل"]   # the representative sheets, in Cover order (data with an
+REP_SHEETS_REGISTERED = REP_SHEETS[:-1]                   # unregistered customer / without one)
 COVER_ROWS = [*COVER_GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء",
               "غير مسجل", "إجمالي المجموعة الثالثة", "الإجمالي العام"]
 RUN_AT = datetime(2026, 11, 7, 9, 30)
@@ -1110,7 +1116,7 @@ def test_representative_sheet_for_a_blank_main_data_cell(tmp_path):
                           load_main_data(write_main(tmp_path / "main.xlsx", [(300002, "ب", "الجملة", None)])))
     assert analysis.verify_analysis_report(result) == []
     sheets = _sheets(result.reps_report_path)
-    assert list(sheets)[-3:] == ["غير محدد", "غير مسجل", "Pivot for Last Day"]  # extra row, unregistered, pivot
+    assert list(sheets)[-3:] == ["احمد الحريري", "غير محدد", "Pivot for Last Day"]  # extra row; no unregistered
     assert [r[1:4] for r in sheets["غير محدد"][1:]] == [["غير محدد", "الجملة", "300002"]] * 2
     assert _cover(sheets)["غير محدد"] == [*_d("3.00", "-1.00", "2.00"), "لا يوجد هدف", 0, 1]
 
@@ -1139,7 +1145,8 @@ def test_empty_master_data_gives_empty_representative_sheets(tmp_path):
     result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, load_main_data(write_main(tmp_path / "main.xlsx")))
     assert analysis.verify_analysis_report(result) == []
     sheets = _sheets(result.reps_report_path)
-    assert all(sheets[name] == [list(MASTER_COLUMNS)] for name in [SHEET_MASTER, *REP_SHEETS])
+    assert all(sheets[name] == [list(MASTER_COLUMNS)] for name in [SHEET_MASTER, *REP_SHEETS_REGISTERED])
+    assert "غير مسجل" not in sheets                                              # no unregistered transaction
     assert _cover(sheets)[GRAND_TOTAL] == [*_d("0", "0", "0"), 219, 0, 0]
 
 
@@ -1295,7 +1302,8 @@ def test_every_sheet_prints_a4_landscape_one_page_wide_with_repeated_header(tmp_
         assert ws.print_options.horizontalCentered, where
         last = get_column_letter(ws.max_column)
         assert ws.print_area.endswith(f"$A$1:${last}${ws.max_row}"), where       # every column, every row
-        assert 0.25 <= ws.page_margins.left <= 1 and 0.25 <= ws.page_margins.right <= 1, where
+        low = 0.2 if book == WORKBOOK_NAME else 0.25                             # the report: minimal margins
+        assert low <= ws.page_margins.left <= 1 and low <= ws.page_margins.right <= 1, where
         assert ws.sheet_view.rightToLeft and ws.freeze_panes == "A3", where
 
 
@@ -1315,6 +1323,18 @@ def test_long_unregistered_list_is_not_squeezed_onto_one_page(tmp_path):
     assert ws.max_row == 43 and ws.page_setup.fitToHeight == 0 and ws.page_setup.fitToWidth == 1
 
 
+def _content_width(ws, col):
+    """The narrowest column that still shows every body value of ``col`` and the longest header word whole."""
+    def shown(v):
+        if isinstance(v, (int, float)):
+            return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
+        return str(v or "")
+    body = max((len(shown(ws.cell(row=r, column=col).value)) for r in range(3, ws.max_row + 1)
+                if ws.cell(row=r, column=col).value is not None), default=0)
+    word = max((len(w) for w in str(ws.cell(row=2, column=col).value or "").split()), default=0)
+    return max(body, word) + 1
+
+
 def test_header_and_body_fonts(tmp_path, setup):
     result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, setup)
     for book, ws in _all_sheets(result):
@@ -1324,10 +1344,13 @@ def test_header_and_body_fonts(tmp_path, setup):
         assert ws.row_dimensions[2].height >= 36, (book, ws.title)
         for col in range(1, ws.max_column + 1):
             h = ws.cell(row=2, column=col)
-            assert h.font.name == "Segoe UI" and h.font.bold and h.font.size >= 12 and h.font.color.rgb.endswith("FFFFFF")
-            assert h.fill.fgColor.rgb.endswith("1F4E78")
+            report = book == WORKBOOK_NAME                                       # report: grey header, black text
+            assert h.font.name == "Segoe UI" and h.font.bold and h.font.size >= 12
+            assert h.font.color.rgb.endswith("000000" if report else "FFFFFF")
+            assert h.fill.fgColor.rgb.endswith("BFBFBF" if report else "1F4E78")
             assert (h.alignment.horizontal, h.alignment.vertical, h.alignment.wrap_text) == ("center", "center", True)
-            assert ws.column_dimensions[get_column_letter(col)].width >= 14
+            minimum = _content_width(ws, col) if book == WORKBOOK_NAME else 14   # report: fitted to its content
+            assert ws.column_dimensions[get_column_letter(col)].width >= minimum, (book, ws.title, col)
         for r in range(3, ws.max_row + 1):
             assert ws.row_dimensions[r].height >= (34 if cover else 22), (book, ws.title, r)
             for col in range(1, ws.max_column + 1):
@@ -1465,7 +1488,8 @@ def test_excluded_representative_is_absent_from_both_workbooks(tmp_path):
                                                             "343.00")            # her 1000 / -100 left out
     assert _by_label(report[SHEET_SECTORS])[GRAND_TOTAL][-1] == D("347.00") == _cover(_sheets(result.reps_report_path))[GRAND_TOTAL][2]
     sheets = load_workbook(result.reps_report_path).sheetnames
-    assert sheets == ["Cover", "Master Data", *GROUP_ONE, *GROUP_TWO, "مندوب جديد", "غير مسجل", "Pivot for Last Day"]
+    assert sheets == ["Cover", "Master Data", *COVER_GROUP_ONE, *GROUP_TWO, "مندوب جديد", "غير مسجل",
+                      "Pivot for Last Day"]
 
 
 def test_reconcile_detects_an_excluded_transaction(tmp_path):
@@ -1512,7 +1536,8 @@ def test_serial_column_formatting_and_print_area(tmp_path):
         for ws in load_workbook(path).worksheets:
             if ws.title == "Pivot for Last Day":                                  # no م: its own tests
                 continue
-            assert ws.cell(row=2, column=1).value == "م" and ws.column_dimensions["A"].width >= 14
+            assert ws.cell(row=2, column=1).value == "م"
+            assert ws.column_dimensions["A"].width >= (_content_width(ws, 1) if path == result.report_path else 14)
             a = ws.cell(row=3, column=1)                                         # a data row or الإجمالي العام
             assert a.font.name == "Segoe UI" and a.font.bold and a.alignment.horizontal == "center"
             assert ws.print_area.endswith(f"$A$1:${get_column_letter(ws.max_column)}${ws.max_row}")
@@ -1571,7 +1596,7 @@ def test_returns_column_follows_net_in_master_data_and_every_representative_shee
     _, sheets = _returns_column_run(tmp_path)
     header = ["التاريخ", "المندوب", "القطاع", "كود العميل", "اسم العميل", "المبيعات", "الصافي", "المرتجعات",
               "حالة كود العميل"]
-    for name in [SHEET_MASTER, *REP_SHEETS]:                                     # empty sheets included
+    for name in [SHEET_MASTER, *REP_SHEETS_REGISTERED]:                          # empty sheets included
         assert sheets[name][0] == header, name
     raw = load_workbook(_returns_column_run(tmp_path / "again")[0].reps_report_path)[SHEET_MASTER]
     assert [raw.cell(row=2, column=c).value for c in range(1, 11)] == ["م", *header]
@@ -1598,13 +1623,14 @@ def test_returns_column_values_and_totals(tmp_path):
 def test_returns_column_sales_only_and_empty_sheets(tmp_path):
     _, sheets = _returns_column_run(tmp_path, [row(Y5, S, "10.00", 100001), row(P5, S, "0.00", 100001, doc="2")])
     assert [r[7] for r in sheets[SHEET_MASTER][1:]] == _d("0", "0")
-    assert all(sheets[name] == [sheets[SHEET_MASTER][0]] for name in REP_SHEETS if name != "سامح السيد محمود احم")
+    assert all(sheets[name] == [sheets[SHEET_MASTER][0]] for name in REP_SHEETS_REGISTERED
+               if name != "سامح السيد محمود احم")
 
 
 def test_each_representative_sheet_reconciles_with_master_data_including_returns(tmp_path):
     _, sheets = _returns_column_run(tmp_path)
     master = sheets[SHEET_MASTER][1:]
-    for name in REP_SHEETS:
+    for name in REP_SHEETS_REGISTERED:
         mine = [r for r in master if r[1] == name]
         assert sheets[name][1:] == mine
         assert sum((r[7] for r in sheets[name][1:]), D(0)) == sum((r[7] for r in mine), D(0))
@@ -1635,7 +1661,7 @@ def test_wrong_returns_column_is_detected(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ report groups, detail totals, report date line
-REPORT_GROUPED = [*GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", "مندوب جديد", UNREGISTERED,
+REPORT_GROUPED = [*COVER_GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", "مندوب جديد", UNREGISTERED,
                   "إجمالي المجموعة الثالثة", GRAND_TOTAL]
 
 
@@ -1655,12 +1681,12 @@ def test_report_representatives_follow_the_cover_groups_with_subtotals(tmp_path)
     assert counts[GRAND_TOTAL] == [2, 3, 5] and DINA not in rows                  # distinct over the report
 
 
-def test_third_report_subtotal_only_when_its_group_has_transactions(tmp_path):
+def test_third_report_group_only_when_it_has_a_row(tmp_path):
     write_erp_csv(tmp_path / "input" / "m.csv", [row(Y5, S, "1.00", 100001)])
     result = run_analysis(_config(tmp_path), MODE_ALL, None, load_main_data(write_main(tmp_path / "main.xlsx")))
     assert analysis.verify_analysis_report(result) == []
     labels = [r[0] for r in _sheets(result.report_path)[SHEET_REPS][1:]]
-    assert labels == [*GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", UNREGISTERED, GRAND_TOTAL]
+    assert labels == [*COVER_GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", GRAND_TOTAL]
 
 
 def test_report_subtotal_counts_distinct_customers_and_are_reconciled(tmp_path, monkeypatch):
@@ -1681,7 +1707,7 @@ def test_saved_report_subtotal_is_verified(tmp_path):
     wb = load_workbook(result.report_path)
     ws = wb[SHEET_REPS]
     sub = next(r for r in range(3, ws.max_row + 1) if ws.cell(row=r, column=2).value == "إجمالي المباشر")
-    assert ws.cell(row=sub, column=1).value is None and ws.cell(row=sub, column=2).fill.fgColor.rgb.endswith("E7E6E6")
+    assert ws.cell(row=sub, column=1).value is None and ws.cell(row=sub, column=2).fill.fgColor.rgb.endswith("D9D9D9")
     ws.cell(row=sub, column=5).value = 1.0                                        # its إجمالي المبيعات
     wb.save(result.report_path)
     problems = analysis.verify_analysis_report(result)
@@ -1692,7 +1718,7 @@ def test_every_representative_sheet_ends_with_a_grand_total(tmp_path):
     result = _group_run(tmp_path)
     raw = _raw(result.reps_report_path)
     names = list(raw)[2:-1]                                                     # not Pivot for Last Day
-    assert names == [*GROUP_ONE, *GROUP_TWO, "مندوب جديد", "غير مسجل"] and list(raw)[-1] == "Pivot for Last Day"
+    assert names == [*COVER_GROUP_ONE, *GROUP_TWO, "مندوب جديد", "غير مسجل"] and list(raw)[-1] == "Pivot for Last Day"
     for name in names:
         total = raw[name][-1]
         assert total[0] is None and total[1] == GRAND_TOTAL, name                 # no serial number
@@ -1789,8 +1815,8 @@ PIVOT_ROWS = [
     row(Y5, S, "100.00", 600001, "اسم في الملف", doc="1001"),       # one invoice, three product rows
     row(Y5, S, "50.00", 600001, doc="1001"), row(Y5, S, "25.00", 600001, doc="1001"),
     row(Y5, S, "30.00", 600001, doc="1002"),                         # a second invoice of the same customer
-    row(Y5, R, "-20.00", 600001, doc="501"),                         # returns: never an invoice
-    row(Y5, R, "-5.00", 600001, doc="1002"),                         # a return numbered like a sales invoice
+    row(Y5, R, "-20.00", 600001, doc="501"),                         # a return document counts too
+    row(Y5, R, "-5.00", 600001, doc="1002"),                         # a return numbered like a sale: a 2nd document
     row(Y5, S, "60.00", 600002, doc="1003"),
     row(P5, S, "999.00", 600002, doc="1004"),                        # an earlier day: not in the pivot
     row(Y5, R, "-15.00", 600003, doc="502"),                         # returns only
@@ -1798,17 +1824,17 @@ PIVOT_ROWS = [
     row(F5, S, "500.00", 600004, doc="2002"),                        # after the date: not counted at all
     row(Y5, S, "10.00", 777777, "زائر", doc="3001"),                 # unregistered: CSV name
 ]
-PIVOT_EXPECTED = [                                                  # customer names: CSV column G, never Main Data
-    ["هند محمد رضا", "اسم 600003", 0, *_d("0", "-15", "-15")],       # Cover order: هند before سامح
-    ["إجمالي هند محمد رضا", None, 0, *_d("0", "-15", "-15")],
-    ["سامح السيد محمود احم", "اسم 600002", 1, *_d("60", "0", "60")],  # customers by name
-    ["سامح السيد محمود احم", "اسم في الملف", 2, *_d("205", "-25", "180")],  # 600001: its first CSV name
-    ["إجمالي سامح السيد محمود احم", None, 3, *_d("265", "-25", "240")],
-    ["هشام احمد محمد", "اسم 600004", 1, *_d("80", "0", "80")],
-    ["إجمالي هشام احمد محمد", None, 1, *_d("80", "0", "80")],
-    ["غير مسجل", "زائر", 1, *_d("10", "0", "10")],
-    ["إجمالي غير مسجل", None, 1, *_d("10", "0", "10")],
-    [GRAND_TOTAL, None, 5, *_d("355", "-40", "315")],
+PIVOT_EXPECTED = [  # customer names: CSV column G, never Main Data; عدد العملاء blank on customers, distinct codes on totals
+    ["هند محمد رضا", "اسم 600003", 1, None, *_d("0", "-15", "-15")],       # Cover order: هند before سامح; return 502
+    ["إجمالي هند محمد رضا", None, 1, 1, *_d("0", "-15", "-15")],
+    ["سامح السيد محمود احم", "اسم 600002", 1, None, *_d("60", "0", "60")],  # customers by name
+    ["سامح السيد محمود احم", "اسم في الملف", 4, None, *_d("205", "-25", "180")],  # 600001: sales 1001 + 1002, returns 501 + 1002
+    ["إجمالي سامح السيد محمود احم", None, 5, 2, *_d("265", "-25", "240")],
+    ["هشام احمد محمد", "اسم 600004", 1, None, *_d("80", "0", "80")],
+    ["إجمالي هشام احمد محمد", None, 1, 1, *_d("80", "0", "80")],
+    ["غير مسجل", "زائر", 1, None, *_d("10", "0", "10")],
+    ["إجمالي غير مسجل", None, 1, 1, *_d("10", "0", "10")],
+    [GRAND_TOTAL, None, 8, 5, *_d("355", "-40", "315")],
 ]
 
 
@@ -1820,46 +1846,48 @@ def _pivot_run(tmp_path, ref=REF, mode=MODE_YESTERDAY, rows=PIVOT_ROWS):
     return result, _sheets(result.reps_report_path)[PIVOT]
 
 
-def test_pivot_is_the_last_sheet_with_the_six_columns(tmp_path):
+def test_pivot_is_the_last_sheet_with_the_seven_columns(tmp_path):
     result, pivot = _pivot_run(tmp_path)
     wb = load_workbook(result.reps_report_path)
     assert wb.sheetnames[-1] == PIVOT and wb.sheetnames[:2] == ["Cover", "Master Data"]
-    assert pivot[0] == ["اسم المندوب", "العميل", "عدد الفواتير", "إجمالي المبيعات", "إجمالي المرتجعات", "الصافي"]
+    assert pivot[0] == ["اسم المندوب", "العميل", "عدد الفواتير", "عدد العملاء", "إجمالي المبيعات", "إجمالي المرتجعات",
+                        "الصافي"]
     assert wb[PIVOT].cell(row=1, column=1).value == (                          # run 07/11, transactions of 30/10
         "تاريخ تشغيل التقرير: 07/11/2026  |  حركات يوم 30/10/2026 حسب المندوب والعميل")
 
 
 def test_pivot_rows_and_grand_total(tmp_path):
-    """Representatives, customers, invoices once per document, returns signed, net = sales + returns,
+    """Representatives, customers, documents (sales and returns) once each, returns signed, net = sales + returns,
     no earlier or later day, grand total from the transactions."""
     result, pivot = _pivot_run(tmp_path)
     assert pivot[1:] == PIVOT_EXPECTED
     for r in pivot[1:]:
-        assert r[5] == r[3] + r[4]                                               # الصافي = sales + returns
+        assert r[6] == r[4] + r[5]                                               # الصافي = sales + returns
     day = [m for m in result.master if m.day == REF]
-    assert pivot[-1][3:] == [sum((m.sales for m in day), D(0)), sum((m.returns for m in day), D(0)),
+    assert pivot[-1][4:] == [sum((m.sales for m in day), D(0)), sum((m.returns for m in day), D(0)),
                              sum((m.net for m in day), D(0))]
-    assert pivot[-1][2] == len({(m.code, m.doc_no) for m in day if m.category is analysis.Category.SALES}) == 5
-    assert (pivot[-1][3], pivot[-1][4]) == (result.direct.sales_y, result.direct.returns_y)  # = مبيعات / مرتجعات يوم
+    assert pivot[-1][2] == len({(m.code, m.category, m.doc_no) for m in day if m.net != 0}) == 8
+    assert (pivot[-1][4], pivot[-1][5]) == (result.direct.sales_y, result.direct.returns_y)  # = مبيعات / مرتجعات يوم
+    assert pivot[-1][3] == len({m.code for m in day}) == 5                       # distinct customer codes of the day
 
 
 def test_pivot_follows_the_selected_date(tmp_path):
     _, pivot = _pivot_run(tmp_path, ref=date(2026, 10, 20))
-    assert pivot[1:] == [["سامح السيد محمود احم", "اسم 600002", 1, *_d("999", "0", "999")],
-                         ["إجمالي سامح السيد محمود احم", None, 1, *_d("999", "0", "999")],
-                         [GRAND_TOTAL, None, 1, *_d("999", "0", "999")]]
+    assert pivot[1:] == [["سامح السيد محمود احم", "اسم 600002", 1, None, *_d("999", "0", "999")],
+                         ["إجمالي سامح السيد محمود احم", None, 1, 1, *_d("999", "0", "999")],
+                         [GRAND_TOTAL, None, 1, 1, *_d("999", "0", "999")]]
 
 
 def test_pivot_empty_day_gives_zero_totals(tmp_path):
     result, pivot = _pivot_run(tmp_path, ref=date(2026, 10, 25))
-    assert pivot[1:] == [[GRAND_TOTAL, None, 0, *_d("0", "0", "0")]]
+    assert pivot[1:] == [[GRAND_TOTAL, None, 0, 0, *_d("0", "0", "0")]]
     ws = load_workbook(result.reps_report_path)[PIVOT]
-    assert ws.auto_filter.ref == "A2:F2" and ws.max_row == 3
+    assert ws.auto_filter.ref == "A2:G2" and ws.max_row == 3
 
 
 def test_pivot_all_transactions_has_no_day(tmp_path):
     result, pivot = _pivot_run(tmp_path, mode=MODE_ALL)
-    assert pivot[1:] == [[GRAND_TOTAL, None, 0, *_d("0", "0", "0")]]
+    assert pivot[1:] == [[GRAND_TOTAL, None, 0, 0, *_d("0", "0", "0")]]
     title = load_workbook(result.reps_report_path)[PIVOT].cell(row=1, column=1).value
     assert title.startswith("تاريخ تشغيل التقرير: 07/11/2026  |  تقرير كل الحركات: لا يوجد يوم مختار")
 
@@ -1880,10 +1908,10 @@ def test_pivot_print_setup_black_and_white(tmp_path):
     assert int(ws.page_setup.paperSize) == 9 and ws.page_setup.orientation == "landscape"
     assert ws.page_setup.blackAndWhite is True
     assert ws.sheet_properties.pageSetUpPr.fitToPage and ws.page_setup.fitToWidth == 1 and ws.page_setup.fitToHeight == 1
-    assert ws.print_area.endswith(f"$A$1:$F${last}") and ws.print_title_rows == "$1:$2"
+    assert ws.print_area.endswith(f"$A$1:$G${last}") and ws.print_title_rows == "$1:$2"
     assert ws.print_options.horizontalCentered and 0.25 <= ws.page_margins.left <= 0.5
-    assert ws.sheet_view.rightToLeft and ws.freeze_panes == "A3" and ws.auto_filter.ref == f"A2:F{last - 1}"
-    for c in range(1, 7):                                                        # black text, grey / white only
+    assert ws.sheet_view.rightToLeft and ws.freeze_panes == "A3" and ws.auto_filter.ref == f"A2:G{last - 1}"
+    for c in range(1, 8):                                                        # black text, grey / white only
         header, body, total = ws.cell(row=2, column=c), ws.cell(row=3, column=c), ws.cell(row=last, column=c)
         assert header.font.bold and header.font.color.rgb.endswith("000000") and header.fill.fgColor.rgb.endswith("D9D9D9")
         assert body.font.color.rgb.endswith("000000") and body.border.left.color.rgb.endswith("000000")
@@ -1893,7 +1921,10 @@ def test_pivot_print_setup_black_and_white(tmp_path):
              if ws.cell(row=r, column=1).fill.fill_type}
     assert fills <= {"F2F2F2", "D9D9D9"}                                         # light grey stripes / subtotals
     assert ws.cell(row=1, column=1).font.bold and ws.cell(row=1, column=1).font.color.rgb.endswith("000000")
-    assert [ws.cell(row=3, column=c).number_format for c in range(3, 7)] == ["#,##0"] + ["#,##0.00"] * 3
+    assert [ws.cell(row=3, column=c).number_format for c in (3, 5, 6, 7)] == ["#,##0"] + ["#,##0.00"] * 3
+    assert ws.cell(row=3, column=4).value is None                                # customer row: عدد العملاء blank
+    assert ws.cell(row=4, column=4).value == 1 and ws.cell(row=4, column=4).number_format == "#,##0"   # subtotal
+    assert ws.cell(row=last, column=4).value == 5 and ws.cell(row=last, column=4).number_format == "#,##0"
 
 
 def test_long_pivot_prints_one_page_wide_several_pages_down(tmp_path):
@@ -1910,7 +1941,7 @@ def test_wrong_pivot_is_detected(tmp_path, monkeypatch):
     wb[PIVOT].cell(row=wb[PIVOT].max_row, column=3).value = 9                     # الإجمالي العام: عدد الفواتير
     wb.save(result.reps_report_path)
     problems = analysis.verify_analysis_report(result)
-    assert any("/ Pivot for Last Day: row 12 عدد الفواتير 9 differs from 5" in p for p in problems)
+    assert any("/ Pivot for Last Day: row 12 عدد الفواتير 9 differs from 8" in p for p in problems)
     assert any("/ Pivot for Last Day: saved الإجمالي العام" in p for p in problems)
     original = analysis.pivot_table
     monkeypatch.setattr(analysis, "pivot_table",
@@ -1972,15 +2003,16 @@ def test_pivot_representative_subtotals(tmp_path):
                     break
                 customers.append(prev)
             assert customers and {c[0] for c in customers} == {rep}             # right after its own customers
-            assert r[2:] == [sum(c[2] for c in customers), sum(c[3] for c in customers), sum(c[4] for c in customers),
-                             sum(c[5] for c in customers)]
+            assert all(c[3] is None for c in customers)                         # عدد العملاء: blank on customers
+            assert r[2:] == [sum(c[2] for c in customers), len(customers), sum(c[4] for c in customers),
+                             sum(c[5] for c in customers), sum(c[6] for c in customers)]
     subs = [r for r in body if r[1] is None]
     assert [r[0] for r in subs] == ["إجمالي هند محمد رضا", "إجمالي سامح السيد محمود احم", "إجمالي هشام احمد محمد",
                                     "إجمالي غير مسجل"]
-    assert pivot[-1][2:] == [sum(r[2] for r in subs), sum(r[3] for r in subs), sum(r[4] for r in subs),
-                             sum(r[5] for r in subs)]
-    # invoices: 1001 (3 rows) + 1002 for سامح's first customer, 1003 for the second; returns never count
-    assert next(r for r in subs if "سامح" in r[0])[2] == 3
+    assert pivot[-1][2:] == [sum(r[2] for r in subs), 5, sum(r[4] for r in subs), sum(r[5] for r in subs),
+                             sum(r[6] for r in subs)]
+    # documents: sales 1001 (3 rows) + 1002 and returns 501 + 1002 for سامح's first customer, 1003 for the second
+    assert next(r for r in subs if "سامح" in r[0])[2] == 5
     ws = load_workbook(result.reps_report_path)[PIVOT]
     sub_row = next(r for r in range(3, ws.max_row) if ws.cell(row=r, column=1).value == "إجمالي سامح السيد محمود احم")
     cell = ws.cell(row=sub_row, column=1)
@@ -2002,7 +2034,7 @@ def test_pivot_run_date_differs_from_the_transaction_date(tmp_path):
         data[ref] = _sheets(result.reps_report_path)[PIVOT][1:]
     assert titles[date(2026, 11, 11)] == "تاريخ تشغيل التقرير: 12/11/2026  |  حركات يوم 11/11/2026 حسب المندوب والعميل"
     assert titles[date(2026, 11, 10)] == "تاريخ تشغيل التقرير: 12/11/2026  |  حركات يوم 10/11/2026 حسب المندوب والعميل"
-    assert data[date(2026, 11, 11)][-1][3] == D("10.00") and data[date(2026, 11, 10)][-1][3] == D("20.00")
+    assert data[date(2026, 11, 11)][-1][4] == D("10.00") and data[date(2026, 11, 10)][-1][4] == D("20.00")
     # the other sheets keep the selected report date
     other = load_workbook(result.reps_report_path)["Cover"].cell(row=1, column=1).value
     assert other == "تاريخ التقرير: 10/11/2026"
@@ -2026,7 +2058,7 @@ def test_wrong_pivot_subtotal_is_detected(tmp_path, monkeypatch):
     wb = load_workbook(result.reps_report_path)
     ws = wb[PIVOT]
     sub_row = next(r for r in range(3, ws.max_row) if ws.cell(row=r, column=1).value == "إجمالي سامح السيد محمود احم")
-    ws.cell(row=sub_row, column=4).value = 1.0                                   # its إجمالي المبيعات
+    ws.cell(row=sub_row, column=5).value = 1.0                                   # its إجمالي المبيعات
     wb.save(result.reps_report_path)
     problems = analysis.verify_analysis_report(result)
     assert any("saved 'إجمالي سامح السيد محمود احم' differs from the sum of its customers" in p for p in problems)
@@ -2034,7 +2066,7 @@ def test_wrong_pivot_subtotal_is_detected(tmp_path, monkeypatch):
 
     def wrong(r):
         rows = original(r)
-        return [[*row[:3], row[3] + D("1"), row[4], row[5] + D("1")] if row[0] == "إجمالي هند محمد رضا" else row
+        return [[*row[:4], row[4] + D("1"), row[5], row[6] + D("1")] if row[0] == "إجمالي هند محمد رضا" else row
                 for row in rows]
     monkeypatch.setattr(analysis, "pivot_table", wrong)
     assert any("subtotal 'إجمالي هند محمد رضا'" in p and "does not match its customers" in p
@@ -2075,9 +2107,9 @@ def test_cover_labels_groups_and_direct_addition(tmp_path):
     labels = [r[0] for r in analysis.cover_table(result)]
     assert labels == GROUPED_COVER
     assert "إجمالي المجموعة الأولى" not in labels and "إجمالي المجموعة الثانية" not in labels
-    assert labels.index("د هاني") == labels.index("محمود الشيمي") + 1 < labels.index("إجمالي المباشر")
+    assert labels.index("د هاني") == labels.index("إجمالي المباشر") - 1 == labels.index("ندا عبد الناصر طه") + 1
     assert DINA not in labels
-    assert "د هاني" not in _sheets(result.reps_report_path)                       # no data: no sheet of his own
+    assert _sheets(result.reps_report_path)["د هاني"] == [list(MASTER_COLUMNS)]    # a direct rep: his (empty) sheet
 
 
 def test_cover_direct_addition_with_transactions(tmp_path):
@@ -2091,8 +2123,7 @@ def test_cover_direct_addition_with_transactions(tmp_path):
     assert analysis.verify_analysis_report(result) == []
     c = _cover(_sheets(result.reps_report_path))
     labels = list(c)
-    assert labels.count("د هاني") == 1 and labels.index("د هاني") == labels.index("محمود الشيمي") + 1
-    assert labels.index("د هاني") < labels.index("إجمالي المباشر")
+    assert labels.count("د هاني") == 1 and labels.index("د هاني") == labels.index("إجمالي المباشر") - 1
     assert c["د هاني"] == [*_d("70.00", "0", "70.00"), 3, 1, 1]
     assert c["إجمالي المباشر"] == [*_d("220.00", "-15.00", "205.00"), 206, 2, 2]
     assert c["إجمالي المجموعة الثالثة"] == [*_d("39.00", "0", "39.00"), "لا يوجد هدف", 1, 1]
@@ -2165,3 +2196,539 @@ def test_cover_print_setup_black_and_white_a4_landscape(tmp_path):
     assert ws.print_title_rows == "$1:$2" and ws.sheet_view.rightToLeft
     assert [ws.cell(row=2, column=c).value for c in range(1, 10)] == ["م", *COVER_COLUMNS]
     assert all(ws.cell(row=2, column=c).alignment.wrap_text for c in range(1, 10))
+
+
+
+# ------------------------------------------------------------------ Pivot: document count (sales + returns, صافى != 0)
+DOC_MAIN = [(700001, "a", "الجملة", "سامح السيد محمود احم"), (700002, "b", "الجملة", "سامح السيد محمود احم"),
+            (700003, "c", "مستشفيات", "هند محمد رضا")]
+C1, C2, C3 = "اسم 700001", "اسم 700002", "اسم 700003"
+
+
+def _doc_run(tmp_path, files, ref=REF):
+    """Pivot rows by customer name (+ the whole pivot) after a verified run; files: name -> rows."""
+    for name, rows in files.items():
+        write_erp_csv(tmp_path / "input" / name, rows)
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, ref,
+                          load_main_data(write_main(tmp_path / "doc_main.xlsx", DOC_MAIN)), now=RUN_AT)
+    assert analysis.verify_analysis_report(result) == []                          # incl. the independent recount
+    pivot = _sheets(result.reps_report_path)[PIVOT][1:]
+    assert all(r[3] is None for r in pivot if r[1])                               # عدد العملاء blank on customers
+    pivot = [[*r[:3], *r[4:]] for r in pivot]                                     # عدد العملاء has its own tests
+    return result, {r[1]: r for r in pivot if r[1]}, pivot
+
+
+def _one(tmp_path, rows):
+    """[عدد الفواتير, sales, returns, net] of customer 700001."""
+    return _doc_run(tmp_path, {"d.csv": rows})[1][C1][2:]
+
+
+def test_doc_sales_document_with_positive_net_counts_once(tmp_path):
+    assert _one(tmp_path, [row(Y5, S, "500.00", 700001, doc="926")]) == [1, *_d("500", "0", "500")]
+
+
+def test_doc_return_document_with_negative_net_counts_once(tmp_path):
+    assert _one(tmp_path, [row(Y5, R, "-200.00", 700001, doc="235")]) == [1, *_d("0", "-200", "-200")]
+
+
+def test_doc_several_product_rows_count_once(tmp_path):
+    """Example 1: 926 = 500 / 0 / 200 -> one document; the amounts of all three rows are kept."""
+    rows = [row(Y5, S, "500.00", 700001, doc="926"), row(Y5, S, "0.00", 700001, doc="926"),
+            row(Y5, S, "200.00", 700001, doc="926")]
+    assert _one(tmp_path, rows) == [1, *_d("700", "0", "700")]
+
+
+def test_doc_all_zero_rows_are_not_counted(tmp_path):
+    """Example 2: return 235 = 0 / 0 / 0 -> not counted (the customer row stays, with zero amounts)."""
+    rows = [row(Y5, R, "0.00", 700001, doc="235"), row(Y5, R, "0", 700001, doc="235"),
+            row(Y5, R, "-0.00", 700001, doc="235")]
+    assert _one(tmp_path, rows) == [0, *_d("0", "0", "0")]
+
+
+def test_doc_zero_and_non_zero_rows_count_once(tmp_path):
+    rows = [row(Y5, R, "0.00", 700001, doc="240"), row(Y5, R, "-50.00", 700001, doc="240"),
+            row(Y5, R, "0.00", 700001, doc="240")]
+    assert _one(tmp_path, rows) == [1, *_d("0", "-50", "-50")]
+
+
+def test_doc_same_number_in_sales_and_returns_is_two_documents(tmp_path):
+    """Example 3: sales 231 (500) + return 231 (-200) -> 2."""
+    rows = [row(Y5, S, "500.00", 700001, doc="231"), row(Y5, R, "-200.00", 700001, doc="231")]
+    assert _one(tmp_path, rows) == [2, *_d("500", "-200", "300")]
+
+
+def test_doc_negative_returns_count_normally(tmp_path):
+    rows = [row(Y5, R, "-0.01", 700001, doc="300"), row(Y5, R, "-1,234.50", 700001, doc="301")]
+    assert _one(tmp_path, rows) == [2, *_d("0", "-1234.51", "-1234.51")]
+
+
+def test_doc_zero_value_sales_document_is_excluded(tmp_path):
+    rows = [row(Y5, S, "0.00", 700001, doc="236"), row(Y5, S, "40.00", 700001, doc="237")]
+    assert _one(tmp_path, rows) == [1, *_d("40", "0", "40")]
+
+
+def test_doc_zero_value_return_document_is_excluded(tmp_path):
+    rows = [row(Y5, R, "0.00", 700001, doc="238"), row(Y5, R, "-0.00", 700001, doc="239"),
+            row(Y5, R, "-9.00", 700001, doc="241")]
+    assert _one(tmp_path, rows) == [1, *_d("0", "-9", "-9")]
+
+
+def test_doc_duplicate_product_rows_do_not_add_documents(tmp_path):
+    rows = [row(Y5, S, "500.00", 700001, doc="926")] * 3                          # the very same row three times
+    assert _one(tmp_path, rows) == [1, *_d("1500", "0", "1500")]                 # amounts: every row, as before
+
+
+def test_doc_same_document_in_two_files_counts_once_amounts_kept(tmp_path):
+    result, by_name, _ = _doc_run(tmp_path, {"a.csv": [row(Y5, S, "500.00", 700001, doc="926")],
+                                             "b.csv": [row(Y5, S, "500.00", 700001, doc="926"),
+                                                       row(Y5, R, "-20.00", 700001, doc="926")]})
+    assert by_name[C1][2:] == [2, *_d("1000", "-20", "980")]                     # sale 926 once + return 926
+    assert len([m for m in result.master if m.code == "700001"]) == 3            # no transaction row dropped
+
+
+def test_doc_unusual_sign_and_blank_document_number(tmp_path):
+    rows = [row(Y5, S, "-10.00", 700001, doc="500"),                           # a sale with a negative صافى
+            row(Y5, S, "5.00", 700001, doc=""), row(Y5, S, "6.00", 700001, doc="")]  # no number: each its own
+    assert _one(tmp_path, rows) == [3, *_d("1", "0", "1")]
+
+
+def test_doc_customer_representative_and_grand_totals(tmp_path):
+    rows = [row(Y5, S, "100.00", 700001, doc="1"), row(Y5, S, "0.00", 700001, doc="1"),
+            row(Y5, R, "-10.00", 700001, doc="1"), row(Y5, S, "0.00", 700001, doc="2"),      # 700001: 2
+            row(Y5, S, "30.00", 700002, doc="3"), row(Y5, R, "-5.00", 700002, doc="4"),
+            row(Y5, R, "-5.00", 700002, doc="4"),                                             # 700002: 2
+            row(Y5, R, "-7.00", 700003, doc="1"), row(Y5, R, "0.00", 700003, doc="9"),        # 700003: 1
+            row(Y5, S, "8.00", 888888, "زائر", doc="5")]                                      # unregistered: 1
+    result, by_name, pivot = _doc_run(tmp_path, {"d.csv": rows})
+    assert [by_name[n][2] for n in (C1, C2, C3, "زائر")] == [2, 2, 1, 1]
+    subs = {r[0]: r[2:] for r in pivot if r[1] is None}
+    assert subs["إجمالي سامح السيد محمود احم"] == [4, *_d("130", "-20", "110")]
+    assert subs["إجمالي هند محمد رضا"] == [1, *_d("0", "-7", "-7")]
+    assert subs["إجمالي غير مسجل"] == [1, *_d("8", "0", "8")]
+    assert pivot[-1] == [GRAND_TOTAL, None, 6, *_d("138", "-27", "111")]
+    independent = analysis.independent_pivot(result)                              # from the raw source cells
+    assert sum(len(v[1]) for v in independent.values()) == 6
+    assert independent[("سامح السيد محمود احم", "700001")][1] == {("مبيعات", "1"), ("مرتجعات", "1")}
+
+
+def test_doc_count_follows_the_selected_date(tmp_path):
+    rows = [row(Y5, S, "10.00", 700001, doc="1"), row(P5, S, "20.00", 700001, doc="2"),
+            row(P5, R, "-3.00", 700001, doc="2"), row(F5, S, "40.00", 700001, doc="3")]
+    assert _one(tmp_path / "y", rows) == [1, *_d("10", "0", "10")]                 # 30/10 only
+    _, by_name, _ = _doc_run(tmp_path / "p", {"d.csv": rows}, ref=date(2026, 10, 20))
+    assert by_name[C1][2:] == [2, *_d("20", "-3", "17")]                         # 20/10 only
+
+
+def test_doc_count_change_leaves_every_amount_and_other_sheet_unchanged(tmp_path):
+    """The same input as before the change: only عدد الفواتير differs; amounts = every row, zero rows included."""
+    rows = [row(Y5, S, "100.00", 700001, doc="1"), row(Y5, S, "0.00", 700001, doc="2"),
+            row(Y5, R, "-10.00", 700001, doc="3"), row(Y5, R, "0.00", 700002, doc="4")]
+    result, by_name, pivot = _doc_run(tmp_path, {"d.csv": rows})
+    day = [m for m in result.master if m.day == REF]
+    assert pivot[-1][3:] == [sum((m.sales for m in day), D(0)), sum((m.returns for m in day), D(0)),
+                             sum((m.net for m in day), D(0))] == _d("100", "-10", "90")
+    assert (pivot[-1][3], pivot[-1][4]) == (result.direct.sales_y, result.direct.returns_y)
+    assert by_name[C2][2:] == [0, *_d("0", "0", "0")] and by_name[C1][2] == 2
+    sheets = _sheets(result.reps_report_path)
+    assert len(sheets[SHEET_MASTER]) - 1 == 4                                     # every transaction row kept
+
+
+def test_doc_reconciliation_detects_missing_extra_and_wrong_counts(tmp_path, monkeypatch):
+    rows = [row(Y5, S, "100.00", 700001, doc="1"), row(Y5, R, "-10.00", 700001, doc="1"),
+            row(Y5, S, "30.00", 700002, doc="3")]
+    result, _, _ = _doc_run(tmp_path, {"d.csv": rows})
+    original_groups = analysis._pivot_groups
+
+    def drop(r):                                                                  # a document lost by the build
+        groups = original_groups(r)
+        next(g for (_, code), g in groups.items() if code == "700001")["invoices"].discard(("مرتجعات", "1"))
+        return groups
+    monkeypatch.setattr(analysis, "_pivot_groups", drop)
+    problems = analysis.reconcile(result)
+    assert any("customer 700001: documents missing from عدد الفواتير [('مرتجعات', '1')]" in p for p in problems)
+    assert any("customer rows differ" in p for p in problems)
+    assert any("subtotal 'إجمالي سامح السيد محمود احم'" in p for p in problems)
+    assert any("Pivot for Last Day: الإجمالي العام" in p for p in problems)
+
+    def extra(r):                                                                 # a document counted that is not there
+        groups = original_groups(r)
+        next(g for (_, code), g in groups.items() if code == "700002")["invoices"].add(("مبيعات", "999"))
+        return groups
+    monkeypatch.setattr(analysis, "_pivot_groups", extra)
+    assert any("customer 700002: extra documents in عدد الفواتير [('مبيعات', '999')]" in p
+               for p in analysis.reconcile(result))
+    monkeypatch.setattr(analysis, "_pivot_groups", original_groups)
+    original_table = analysis.pivot_table
+    monkeypatch.setattr(analysis, "pivot_table", lambda r: [
+        [*row[:2], row[2] + 1, *row[3:]] if row[0] == GRAND_TOTAL else row for row in original_table(r)])
+    assert any("Pivot for Last Day: الإجمالي العام" in p for p in analysis.reconcile(result))
+    monkeypatch.setattr(analysis, "pivot_table", lambda r: [
+        [*row[:2], row[2] + 1, *row[3:]] if str(row[0]).startswith("إجمالي سامح") else row
+        for row in original_table(r)])
+    assert any("subtotal 'إجمالي سامح السيد محمود احم'" in p for p in analysis.reconcile(result))
+
+
+def test_doc_reconciliation_is_independent_of_master_data(tmp_path):
+    """The recount reads the raw source cells: a wrong document number / amount in the built rows is caught."""
+    rows = [row(Y5, S, "100.00", 700001, doc="1"), row(Y5, R, "-10.00", 700001, doc="2")]
+    result, _, _ = _doc_run(tmp_path, {"d.csv": rows})
+    assert analysis.reconcile_pivot(result) == []
+    result.master[1] = replace(result.master[1], doc_no="1", category=analysis.Category.SALES)  # return -> sale 1
+    problems = analysis.reconcile_pivot(result)
+    assert any("documents missing from عدد الفواتير [('مرتجعات', '2')]" in p for p in problems)
+    result.master[1] = replace(result.master[1], doc_no="2", category=analysis.Category.RETURNS, net=D("0"))
+    assert any("documents missing from عدد الفواتير [('مرتجعات', '2')]" in p
+               for p in analysis.reconcile_pivot(result))                       # a lost صافى is caught too
+
+
+
+# ------------------------------------------------------------------ Pivot: عدد العملاء (distinct customer codes)
+ISLAM, SAMEH, HIND = "اسلام حمد كمال محمد", "سامح السيد محمود احم", "هند محمد رضا"
+CUST_MAIN = [(800001, "x", "الجملة", ISLAM), (800002, "y", "الجملة", ISLAM),
+             *[(800010 + i, f"s{i}", "الجملة", SAMEH) for i in range(5)],
+             (800020, "h", "مستشفيات", HIND)]
+CUST_ROWS = [
+    row(Y5, S, "100.00", 800001, "phoenix", doc="926"), row(Y5, S, "50.00", 800001, "phoenix", doc="927"),
+    row(Y5, R, "-20.00", 800001, "phoenix", doc="232"),                       # phoenix: 3 documents, ONE customer
+    row(Y5, R, "-30.00", 800002, "جونيور تكس", doc="223"),                    # returns only: still a customer
+    *[row(Y5, S, f"{10 + i}.00", 800010 + i, f"عميل سامح {i}", doc=str(940 + i)) for i in range(5)],
+    row(Y5, S, "0.00", 800014, f"عميل سامح 4", doc="950"),                   # a zero row of a counted customer
+    row(P5, S, "70.00", 800020, "هند يوم سابق", doc="960"),                   # هند: nothing on the selected day
+]
+
+
+def _cust_run(tmp_path, rows=CUST_ROWS):
+    write_erp_csv(tmp_path / "input" / "c.csv", rows)
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF,
+                          load_main_data(write_main(tmp_path / "cust_main.xlsx", CUST_MAIN)), now=RUN_AT)
+    assert analysis.verify_analysis_report(result) == []
+    return result, _sheets(result.reps_report_path)[PIVOT]
+
+
+def test_pivot_customer_count_per_representative_and_grand_total(tmp_path):
+    result, pivot = _cust_run(tmp_path)
+    assert pivot[0][2:4] == ["عدد الفواتير", "عدد العملاء"]                       # next to عدد الفواتير
+    body = pivot[1:]
+    subs = {r[0]: r for r in body if r[1] is None}
+    assert subs[f"إجمالي {ISLAM}"][2:] == [4, 2, *_d("150", "-50", "100")]      # phoenix + جونيور تكس = 2
+    assert subs[f"إجمالي {SAMEH}"][2:] == [5, 5, *_d("60", "0", "60")]          # five distinct customers
+    assert f"إجمالي {HIND}" not in subs and not any(r[0] == HIND for r in body)  # no customer that day: no row
+    assert body[-1] == [GRAND_TOTAL, None, 9, 7, *_d("210", "-50", "160")]
+    customers = [r for r in body[:-1] if r[1] is not None]
+    assert len(customers) == 7 and all(r[3] is None for r in customers)          # blank on every customer row
+    phoenix = next(r for r in customers if r[1] == "phoenix")
+    assert phoenix[2:] == [3, None, *_d("150", "-20", "130")]                    # 3 transactions: one customer
+    assert analysis.reconcile_pivot(result) == []
+
+
+def test_pivot_customer_count_is_distinct_codes_not_names(tmp_path):
+    """Two customers with the same CSV name are two customers; one code with two names is one customer."""
+    rows = [row(Y5, S, "10.00", 800010, "صيدلية", doc="1"), row(Y5, S, "20.00", 800011, "صيدلية", doc="2"),
+            row(Y5, S, "30.00", 800012, "اسم أول", doc="3"), row(Y5, S, "40.00", 800012, "اسم ثان", doc="4")]
+    _, pivot = _cust_run(tmp_path, rows)
+    assert pivot[-2][:4] == [f"إجمالي {SAMEH}", None, 4, 3] and pivot[-1][3] == 3
+
+
+def test_pivot_grand_total_counts_a_code_under_two_representatives_once(tmp_path):
+    """Should one code ever sit under two representatives, each subtotal counts it, الإجمالي العام counts it once."""
+    result, _ = _cust_run(tmp_path)
+    moved = next(i for i, m in enumerate(result.master) if m.code == "800002")
+    result.master.append(replace(result.master[moved], representative=SAMEH, rep_row=SAMEH))  # 800002 also under سامح
+    rows = analysis.pivot_table(result)
+    subs = {r[0]: r for r in rows if r[1] == ""}
+    assert subs[f"إجمالي {ISLAM}"][3] == 2 and subs[f"إجمالي {SAMEH}"][3] == 6
+    assert rows[-1][3] == 7 != subs[f"إجمالي {ISLAM}"][3] + subs[f"إجمالي {SAMEH}"][3]   # distinct, not 2 + 6
+    assert any("الإجمالي العام" not in p and "subtotal" in p for p in analysis.reconcile_pivot(result))
+
+
+def test_pivot_customer_count_keeps_documents_and_amounts(tmp_path):
+    """The new column changes no other cell: documents and amounts are those of the rule before it."""
+    result, pivot = _cust_run(tmp_path)
+    without = [[*r[:3], *r[4:]] for r in pivot[1:]]
+    groups = analysis._pivot_groups(result)
+    assert sum(len(g["invoices"]) for g in groups.values()) == without[-1][2] == 9
+    day = [m for m in result.master if m.day == REF]
+    assert without[-1][3:] == [sum((m.sales for m in day), D(0)), sum((m.returns for m in day), D(0)),
+                               sum((m.net for m in day), D(0))]
+    assert (pivot[-1][4], pivot[-1][5]) == (result.direct.sales_y, result.direct.returns_y)
+
+
+def test_wrong_pivot_customer_count_is_detected_in_the_saved_file(tmp_path):
+    result, _ = _cust_run(tmp_path)
+    path = result.reps_report_path
+    original = path.read_bytes()
+    for row_label, value, message in [
+            (f"إجمالي {SAMEH}", 4, f"saved 'إجمالي {SAMEH}' عدد العملاء 4 is not its 5 customer rows"),
+            ("phoenix", 1, "customer row has عدد العملاء 1; it must be blank"),
+            (GRAND_TOTAL, 8, "saved الإجمالي العام عدد العملاء 8 is not between 1 and its 7 customer rows")]:
+        path.write_bytes(original)
+        wb = load_workbook(path)
+        ws = wb[PIVOT]
+        r = next(r for r in range(3, ws.max_row + 1) if row_label in (ws.cell(row=r, column=1).value,
+                                                                      ws.cell(row=r, column=2).value))
+        ws.cell(row=r, column=4).value = value
+        wb.save(path)
+        problems = analysis.verify_analysis_report(result)
+        assert any(message in p for p in problems), (row_label, problems)
+        assert any("عدد العملاء" in p and "differs from" in p for p in problems)   # the cell check too
+
+
+def test_wrong_pivot_customer_count_is_detected_by_the_reconciliation(tmp_path, monkeypatch):
+    result, _ = _cust_run(tmp_path)
+    original = analysis.pivot_table
+
+    def patch(change):
+        monkeypatch.setattr(analysis, "pivot_table", lambda r: [change(row) for row in original(r)])
+        return analysis.reconcile(result)
+
+    problems = patch(lambda row: [*row[:3], 4, *row[4:]] if row[0] == f"إجمالي {SAMEH}" else row)
+    assert any(f"subtotal 'إجمالي {SAMEH}'" in p for p in problems)
+    problems = patch(lambda row: [*row[:3], 9, *row[4:]] if row[0] == GRAND_TOTAL else row)
+    assert any("Pivot for Last Day: الإجمالي العام" in p for p in problems)
+    problems = patch(lambda row: [*row[:3], 1, *row[4:]] if row[1] == "phoenix" else row)
+    assert any("customer row 'phoenix' has عدد العملاء 1; it must be blank" in p for p in problems)
+    monkeypatch.setattr(analysis, "pivot_table", lambda r: [                    # a customer row written twice
+        *[row for row in original(r) for _ in range(2 if row[1] == "phoenix" else 1)]])
+    problems = analysis.reconcile(result)
+    assert any(f"'{ISLAM}' has 3 customer rows for 2 distinct customer codes" in p for p in problems)
+
+
+def test_pivot_customer_column_layout(tmp_path):
+    result, _ = _cust_run(tmp_path)
+    ws = load_workbook(result.reps_report_path)[PIVOT]
+    last = ws.max_row
+    header = ws.cell(row=2, column=4)
+    assert header.value == "عدد العملاء" and header.font.bold and header.fill.fgColor.rgb.endswith("D9D9D9")
+    assert ws.column_dimensions["D"].width >= 14 and ws.sheet_view.rightToLeft
+    assert ws.auto_filter.ref == f"A2:G{last - 1}" and ws.print_area.endswith(f"$A$1:$G${last}")
+    assert ws.page_setup.fitToWidth == 1 and ws.page_setup.blackAndWhite is True
+    sub = next(r for r in range(3, last) if ws.cell(row=r, column=1).value == f"إجمالي {SAMEH}")
+    assert ws.cell(row=sub, column=4).value == 5 and ws.cell(row=sub, column=4).border.top.style == "medium"
+    assert ws.cell(row=sub - 1, column=4).value is None and ws.cell(row=sub - 1, column=4).border.top.style == "thin"
+    assert ws.cell(row=last, column=4).border.top.style == "double"
+    assert ws.cell(row=1, column=1).value.startswith("تاريخ تشغيل التقرير: 07/11/2026")
+
+
+
+# ------------------------------------------------------------------ د هاني in المباشر, conditional عملاء غير مسجلين
+NOTE = "لا يوجد عملاء غير مسجلين في بيانات هذا التقرير"
+DH_MAIN = [(910001, "a", "الجملة", "سامح السيد محمود احم"), (910002, "b", "وكلاء الدلتا", "هشام احمد محمد"),
+           (910003, "c", "شركات شحن", "د هاني"), (910004, "d", "شركات شحن", "د هاني")]
+DH_ROWS = [row(Y5, S, "100.00", 910001, doc="1"), row(P5, R, "-10.00", 910001, doc="2"),
+           row(Y5, S, "40.00", 910002, doc="3"),
+           row(Y5, S, "300.00", 910003, doc="4"), row(P5, S, "20.00", 910004, doc="5"), row(Y5, R, "-30.00", 910003, doc="6")]
+
+
+def _dh_run(tmp_path, extra=(), mode=MODE_YESTERDAY):
+    write_erp_csv(tmp_path / "input" / "d.csv", [*DH_ROWS, *extra])
+    result = run_analysis(_config(tmp_path), mode, REF if mode == MODE_YESTERDAY else None,
+                          load_main_data(write_main(tmp_path / "dh_main.xlsx", DH_MAIN)),
+                          fixed_codes=frozenset({"910001", "910003"}), now=RUN_AT)
+    assert analysis.verify_analysis_report(result) == []                          # incl. the reconciliation
+    return result, _sheets(result.report_path), _sheets(result.reps_report_path)
+
+
+def test_dhani_is_once_in_the_direct_group_of_both_workbooks(tmp_path):
+    result, report, reps = _dh_run(tmp_path)
+    labels = [r[0] for r in report[SHEET_REPS][1:]]
+    assert labels == [*COVER_GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", GRAND_TOTAL]
+    assert labels.count("د هاني") == 1 and labels[labels.index("إجمالي المباشر") - 1] == "د هاني"
+    cover = [r[0] for r in reps[SHEET_COVER][1:]]
+    assert cover == [*COVER_GROUP_ONE, "إجمالي المباشر", *GROUP_TWO, "إجمالي الوكلاء", GRAND_TOTAL]
+    assert list(reps)[2:-1] == REP_SHEETS_REGISTERED                             # sheet order follows the groups
+    assert [r[1] for r in reps["د هاني"][1:]] == ["د هاني"] * 3
+
+
+def test_direct_subtotal_includes_dhani_and_agents_exclude_him(tmp_path):
+    result, report, reps = _dh_run(tmp_path)
+    rows, counts = _by_label(report[SHEET_REPS]), _counts(report[SHEET_REPS])
+    assert rows["د هاني"] == _d("300", "20", "320", "-30", "0", "-30", "290")
+    assert rows["سامح السيد محمود احم"] == _d("100", "0", "100", "0", "-10", "-10", "90")
+    assert rows["إجمالي المباشر"] == _d("400", "20", "420", "-30", "-10", "-40", "380")      # سامح + د هاني
+    assert counts["إجمالي المباشر"] == [2, 1, 3] and counts["د هاني"] == [1, 1, 2]
+    assert rows["إجمالي الوكلاء"] == rows["هشام احمد محمد"] == _d("40", "0", "40", "0", "0", "0", "40")
+    assert rows[GRAND_TOTAL] == _d("440", "20", "460", "-30", "-10", "-40", "420")          # unchanged: all rows
+    assert [a + b for a, b in zip(rows["إجمالي المباشر"], rows["إجمالي الوكلاء"])] == rows[GRAND_TOTAL]
+    c = _cover(reps)
+    assert c["د هاني"] == [*_d("320", "-30", "290"), 3, 1, 1]
+    assert c["إجمالي المباشر"] == [*_d("420", "-40", "380"), 206, 2, 1]
+    assert c["إجمالي الوكلاء"] == [*_d("40", "0", "40"), 13, 0, 1]
+    assert c[GRAND_TOTAL][:3] == _d("460", "-40", "420")
+    assert _by_label(report[SHEET_SECTORS])["شركات شحن"] == _d("300", "20", "320", "-30", "0", "-30", "290")
+
+
+def test_unregistered_rows_shown_with_real_unregistered_customers(tmp_path):
+    """Case A: a non-zero unregistered transaction - every summary shows it, with its group subtotal and totals."""
+    result, report, reps = _dh_run(tmp_path, [row(Y5, S, "7.00", 999001, "زائر", doc="7"),
+                                              row(P5, S, "0.00", 999002, "زائر صفر", doc="8")])
+    assert analysis.unregistered_shown(result)
+    assert _by_label(report[SHEET_SECTORS])[UNREGISTERED] == _d("7", "0", "7", "0", "0", "0", "7")
+    labels = [r[0] for r in report[SHEET_REPS][1:]]
+    assert labels[-4:] == ["إجمالي الوكلاء", UNREGISTERED, "إجمالي المجموعة الثالثة", GRAND_TOTAL]
+    assert _by_label(report[SHEET_REPS])["إجمالي المجموعة الثالثة"] == _d("7", "0", "7", "0", "0", "0", "7")
+    assert report[SHEET_MISSING][1:] == [["999001", "زائر", *_d("7", "0", "7")], ["999002", "زائر صفر", *_d("0", "0", "0")],
+                                         [GRAND_TOTAL, None, *_d("7", "0", "7")]]    # every real code kept
+    c = _cover(reps)
+    assert c["غير مسجل"][:3] == c["إجمالي المجموعة الثالثة"][:3] == _d("7", "0", "7")
+    assert c[GRAND_TOTAL][:3] == _d("467", "-40", "427") and "غير مسجل" in reps
+
+
+def test_no_unregistered_customers_no_placeholder_anywhere(tmp_path):
+    """Case B: no unregistered customer - no row, no third subtotal, no zero total, no sheet."""
+    result, report, reps = _dh_run(tmp_path)
+    assert not analysis.unregistered_shown(result)
+    for sheet in (report[SHEET_SECTORS], report[SHEET_REPS], reps[SHEET_COVER]):
+        labels = [r[0] for r in sheet[1:]]
+        assert not {UNREGISTERED, "غير مسجل", "إجمالي المجموعة الثالثة"} & set(labels)
+        assert labels[-1] == GRAND_TOTAL and None not in labels                   # no blank row
+    assert report[SHEET_MISSING][1:] == [[NOTE, None, None, None, None]]          # a note, not a zero total
+    assert "غير مسجل" not in reps
+
+
+def test_zero_only_unregistered_customers_are_hidden_but_kept_in_master_data(tmp_path):
+    """Case C: unregistered transactions whose صافى are all zero - hidden in the summaries, no zero subtotal; the
+    transactions stay in Master Data (their own sheet), الإجمالي العام unchanged (the zero sale's customer counted)."""
+    plain = _dh_run(tmp_path / "plain")[1]
+    result, report, reps = _dh_run(tmp_path / "zero", [row(Y5, S, "0.00", 999003, "زائر", doc="9"),
+                                                       row(P5, R, "-0.00", 999004, "زائر 2", doc="10")])
+    assert not analysis.unregistered_shown(result)
+    for sheet in (report[SHEET_SECTORS], report[SHEET_REPS], reps[SHEET_COVER]):
+        assert not {UNREGISTERED, "غير مسجل", "إجمالي المجموعة الثالثة"} & {r[0] for r in sheet[1:]}
+    assert report[SHEET_MISSING][1:] == [[NOTE, None, None, None, None]]
+    sectors = _by_label(report[SHEET_SECTORS])
+    assert sectors[GRAND_TOTAL] == _by_label(plain[SHEET_SECTORS])[GRAND_TOTAL]     # amounts unchanged
+    assert _counts(report[SHEET_SECTORS])[GRAND_TOTAL][2] == _counts(plain[SHEET_SECTORS])[GRAND_TOTAL][2] + 1
+    assert len(reps[SHEET_MASTER]) - 1 == 8 and [r[3] for r in reps["غير مسجل"][1:]] == ["999003", "999004"]
+
+
+def test_unregistered_sale_and_return_cancelling_out_are_still_shown(tmp_path):
+    """Non-zero transactions whose sum is zero are real activity: shown (only all-zero transactions are hidden)."""
+    result, report, reps = _dh_run(tmp_path, [row(Y5, S, "5.00", 999005, "زائر", doc="11"),
+                                              row(Y5, R, "-5.00", 999005, "زائر", doc="12")])
+    assert analysis.unregistered_shown(result)
+    assert _by_label(report[SHEET_REPS])[UNREGISTERED] == _d("5", "0", "5", "-5", "0", "-5", "0")
+    assert report[SHEET_MISSING][1][:2] == ["999005", "زائر"]
+
+
+def test_every_other_representative_stays_in_its_group(tmp_path):
+    result, _, _ = _dh_run(tmp_path, [row(Y5, S, "7.00", 999001, "زائر", doc="7")])
+    direct, agents, others = analysis.cover_groups(result)
+    assert direct == [*GROUP_ONE, "د هاني"] and agents == GROUP_TWO and others == [UNREGISTERED]
+    assert analysis.cover_display_groups(result) == analysis.cover_groups(result)   # one grouping everywhere
+
+
+def test_wrong_grouping_or_placeholder_is_detected(tmp_path, monkeypatch):
+    result, _, _ = _dh_run(tmp_path)
+    original_groups = analysis.cover_groups
+    monkeypatch.setattr(analysis, "cover_groups",                                 # د هاني back in the third group
+                        lambda r: [g[:-1] if i == 0 else (g + ["د هاني"] if i == 2 else g)
+                                   for i, g in enumerate(original_groups(r))])
+    problems = analysis.reconcile(result)
+    assert any("تقرير المندوبين: the groups are not المباشر" in p for p in problems)
+    assert any("Cover: the groups are not المباشر" in p for p in problems)
+    monkeypatch.setattr(analysis, "cover_groups", original_groups)
+    original_sectors = analysis.sector_table
+    monkeypatch.setattr(analysis, "sector_table", lambda r: [                     # a zero-only placeholder row
+        *original_sectors(r)[:-1], [UNREGISTERED, *[D("0.00")] * 7, *[0] * 6], original_sectors(r)[-1]])
+    assert any("row 'عملاء غير مسجلين' shown True, expected False" in p for p in analysis.reconcile(result))
+    monkeypatch.setattr(analysis, "sector_table", original_sectors)
+    monkeypatch.setattr(analysis, "missing_table", lambda r: [[GRAND_TOTAL, "", D("0"), D("0"), D("0")]])
+    assert any("العملاء غير المسجلين: shown True" in p for p in analysis.reconcile(result))
+
+
+def test_saved_note_row_is_verified(tmp_path):
+    result, _, _ = _dh_run(tmp_path)
+    wb = load_workbook(result.report_path)
+    wb[SHEET_MISSING].cell(row=3, column=4).value = 0                             # a zero slipped into the note row
+    wb.save(result.report_path)
+    assert any("is not the single note row" in p for p in analysis.verify_analysis_report(result))
+
+
+
+# ------------------------------------------------------------------ تقرير تحليل المبيعات والمرتجعات: black-and-white print
+GREYS = {"404040", "F2F2F2", "D9D9D9", "BFBFBF"}
+
+
+def test_report_prints_black_and_white_a4_landscape_using_the_page(tmp_path, setup):
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, setup)
+    assert analysis.verify_analysis_report(result) == []
+    wb = load_workbook(result.report_path)
+    for ws in wb.worksheets:
+        last_row, last_col = ws.max_row, get_column_letter(ws.max_column)
+        ps = ws.page_setup
+        assert ps.orientation == "landscape" and int(ps.paperSize) == 9, ws.title          # A4 landscape
+        assert ws.sheet_properties.pageSetUpPr.fitToPage and ps.fitToWidth == 1 and ps.fitToHeight == 1
+        assert ps.blackAndWhite is False          # the grey shades print; B&W mode would hide the header text
+        assert ws.page_margins.left == ws.page_margins.right == 0.2 and ws.page_margins.top == 0.3
+        assert ws.page_margins.bottom == 0.35
+        assert ws.print_options.horizontalCentered and ws.print_options.verticalCentered      # centred on the page
+        assert ws.print_title_rows == "$1:$2"                                                 # title + header repeated
+        assert ws.print_area.endswith(f"$A$1:${last_col}${last_row}") and ws.sheet_view.rightToLeft
+        assert ws.cell(row=1, column=1).font.color.rgb.endswith("000000") and ws.cell(row=1, column=1).font.bold
+        for r in range(2, last_row + 1):
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(row=r, column=c)
+                assert cell.font.name == "Segoe UI", (ws.title, r, c)
+                assert cell.font.color.rgb[-6:] == "000000", (ws.title, r, c)          # all text black
+                assert cell.fill.fill_type is None or cell.fill.fgColor.rgb[-6:] in GREYS, (ws.title, r, c)
+                assert cell.border.left.color.rgb.endswith("000000") and cell.border.left.style == "thin"
+        total = ws.cell(row=last_row, column=2)
+        assert total.value == GRAND_TOTAL and total.font.bold and total.fill.fgColor.rgb.endswith("BFBFBF")
+        assert total.border.top.style == "double" and total.border.bottom.style == "medium"
+        data = [r for r in range(3, last_row) if ws.cell(row=r, column=1).value is not None][:4]   # not totals
+        stripes = [ws.cell(row=r, column=2).fill.fill_type for r in data]
+        assert stripes == [None, "solid", None, "solid"][:len(data)], ws.title            # white / light grey
+    reps = wb[SHEET_REPS]
+    sub = next(r for r in range(3, reps.max_row) if reps.cell(row=r, column=2).value == "إجمالي المباشر")
+    cell = reps.cell(row=sub, column=2)
+    assert cell.font.bold and cell.fill.fgColor.rgb.endswith("D9D9D9") and cell.border.top.style == "medium"
+
+
+def test_long_report_sheet_prints_one_page_wide_several_pages_down(tmp_path):
+    write_erp_csv(tmp_path / "input" / "m.csv", [row(Y5, S, "1.00", 700000 + i, doc=str(i)) for i in range(40)])
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, load_main_data(write_main(tmp_path / "main.xlsx")))
+    ws = load_workbook(result.report_path)[SHEET_MISSING]                       # 40 unregistered customers
+    assert ws.page_setup.fitToWidth == 1 and ws.page_setup.fitToHeight == 0       # never shrunk to one page
+    assert ws.print_title_rows == "$1:$2" and ws.page_setup.orientation == "landscape"
+
+
+
+def _printed_height(ws):
+    """(printed table height, printable height) in points at the scale fit-to-width gives this sheet."""
+    m = ws.page_margins
+    printable_w, printable_h = (11.69 - m.left - m.right) * 72, (8.27 - m.top - m.bottom) * 72
+    scale = min(1.0, printable_w / analysis._table_width_points(ws, ws.max_column))
+    return sum(ws.row_dimensions[r].height for r in range(1, ws.max_row + 1)) * scale, printable_h
+
+
+def test_representatives_sheet_rows_fill_the_printable_page_height(tmp_path, setup):
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, setup)
+    wb = load_workbook(result.report_path)
+    ws = wb[SHEET_REPS]
+    printed, printable = _printed_height(ws)
+    assert 0.9 * printable <= printed <= printable                                # no big empty band, still 1 page
+    body = [ws.row_dimensions[r].height for r in range(3, ws.max_row + 1)]
+    data = [ws.row_dimensions[r].height for r in range(3, ws.max_row) if ws.cell(row=r, column=1).value is not None]
+    assert min(data) > 22 and max(data) - min(data) <= 1                          # taller, shared evenly
+    assert all(h <= 28 * analysis._ROW_GROWTH_CAP for h in body)                  # never stretched without limit
+    plain = Workbook().active                                                     # the same table, not filled
+    headers, rows = analysis.sheet_tables(result)[SHEET_REPS]
+    analysis._write_sheet(plain, headers, rows, title="t", subtotals=analysis.rep_subtotal_rows(rows))
+    assert [ws.row_dimensions[r].height for r in (1, 2)] == [plain.row_dimensions[r].height for r in (1, 2)]
+    assert all(ws.row_dimensions[r].height >= plain.row_dimensions[r].height for r in range(3, ws.max_row + 1))
+    sectors, plain_sectors = wb[SHEET_SECTORS], Workbook().active                 # the other sheets: not stretched
+    analysis._write_sheet(plain_sectors, *analysis.sheet_tables(result)[SHEET_SECTORS], title="t")
+    assert [sectors.row_dimensions[r].height for r in range(1, sectors.max_row + 1)] ==         [plain_sectors.row_dimensions[r].height for r in range(1, sectors.max_row + 1)]
+
+
+def test_long_representatives_sheet_is_not_stretched(tmp_path):
+    main = [(800100 + i, "x", "الجملة", f"مندوب إضافي {i:02d}") for i in range(12)]   # 12 extra rows: > 25 rows
+    write_erp_csv(tmp_path / "input" / "m.csv", [row(Y5, S, "1.00", 800100 + i, doc=str(i)) for i in range(12)])
+    result = run_analysis(_config(tmp_path), MODE_YESTERDAY, REF, load_main_data(write_main(tmp_path / "main.xlsx", main)))
+    assert analysis.verify_analysis_report(result) == []
+    ws = load_workbook(result.report_path)[SHEET_REPS]
+    assert ws.max_row > 27 and ws.page_setup.fitToHeight == 0                     # several pages down, never shrunk
+    plain = Workbook().active                                                     # the same table, not filled
+    headers, rows = analysis.sheet_tables(result)[SHEET_REPS]
+    analysis._write_sheet(plain, headers, rows, title="t", subtotals=analysis.rep_subtotal_rows(rows))
+    assert [ws.row_dimensions[r].height for r in range(1, ws.max_row + 1)] ==         [plain.row_dimensions[r].height for r in range(1, ws.max_row + 1)]      # content heights only

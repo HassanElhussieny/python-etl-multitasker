@@ -189,12 +189,12 @@ of the customers Main Data gives her are not counted anywhere (no row, no sheet,
 and the run checks that her name appears in no saved cell. The CSV files and Main Data are not
 changed.
 
-`تقرير تحليل المبيعات والمرتجعات.xlsx`, exactly three sheets:
+`تقرير تحليل المبيعات والمرتجعات.xlsx`, exactly three sheets. Its print design is black and white (grey shades only, no blue, no dark fill): medium grey header with black bold text, white / very light grey rows, black text and borders, bold medium-grey subtotals with strong borders, `الإجمالي العام` a little darker with a double top border, Segoe UI, black title line. Column widths are fitted to the content (headers wrap) so the table fills the page width at a readable scale. Print: A4 landscape, one page wide, one page high up to 25 rows (longer lists continue onto further pages instead of shrinking the text), minimal margins (0.2" left / right, 0.3" top, 0.35" bottom), centred horizontally and vertically, rows 1-2 (title and header) repeated on every page, print area = the table only. Excel's own black-and-white print mode stays off on purpose: it would drop the grey shading. On `تقرير المندوبين` (one page) the row heights are computed from the page: at the scale set by the width, the free printable height is shared equally by the data, subtotal and total rows (each at most 1.8 times its own height; title and header unchanged), so the table fills the A4 landscape page without a large empty band under it.
 
 | Sheet | Rows |
 |---|---|
-| تقرير القطاعات | the 8 sectors (always, even at zero), then `عملاء غير مسجلين`, then `الإجمالي العام` |
-| تقرير المندوبين | the 16 representatives (always; not the excluded one) in the Cover order: group one then `إجمالي المباشر`, group two then `إجمالي الوكلاء`, then any other row (`عملاء غير مسجلين`, a name Main Data adds) with `إجمالي المجموعة الثالثة` when that group has transactions, then `الإجمالي العام`. A subtotal sums its rows' amounts and counts the distinct customers of its group |
+| تقرير القطاعات | the 8 sectors (always, even at zero), then `عملاء غير مسجلين` (only when shown, see below), then `الإجمالي العام` |
+| تقرير المندوبين | the 16 representatives and `د هاني` (always; not the excluded one) in the Cover order: group one then `د هاني` then `إجمالي المباشر`, group two then `إجمالي الوكلاء`, then any other row with transactions (a name Main Data adds, `غير محدد`) and `عملاء غير مسجلين` (only when shown) with `إجمالي المجموعة الثالثة` - the third group only when it has a row, then `الإجمالي العام`. A subtotal sums its rows' amounts and counts the distinct customers of its group |
 | العملاء غير المسجلين | كود العميل، اسم العميل (from CSV column G)، إجمالي المبيعات، إجمالي المرتجعات، الصافي: one row per customer code missing from Main Data, then `الإجمالي العام` |
 
 `Representatives_Analysis_<execution date>.xlsx`:
@@ -204,7 +204,7 @@ changed.
 | Cover | one row per row of تقرير المندوبين (`غير مسجل` / `غير محدد` as in Master Data) plus `د هاني`, in three groups, each followed by its subtotal (see below), then `الإجمالي العام`: م، المندوب، إجمالي البيع، إجمالي المرتجع، صافي، هدف العملاء، عدد العملاء داخل قائمة الـ224 كود، عدد العملاء خارج قائمة الـ224 كود، نسبة تحقيق هدف العملاء |
 | Master Data | one row per counted transaction (م + nine columns), then `الإجمالي العام` |
 | one sheet per representative | in Cover order: that representative's Master Data rows, same columns and order, then its `الإجمالي العام` (only the total when it has no rows) |
-| Pivot for Last Day | the last sheet: the selected reference date only (never today's date, never other days), one row per representative and customer (Cover order, customers by name; the customer name is the CSV customer name, column G, of the customer's first row with one - never Main Data; the code when there is none): اسم المندوب، العميل، عدد الفواتير، إجمالي المبيعات، إجمالي المرتجعات، الصافي; after each representative's customers its subtotal `إجمالي <المندوب>` (bold, strong black borders), then `الإجمالي العام` (= the sum of the subtotals). Row 1 shows `تاريخ تشغيل التقرير:` = the RUN date (the computer's date when Task 5 was run, the same moment that names the run folder) and then the transactions' day (the selected reference date) - two different dates. عدد الفواتير = distinct `رقم المستند` of the sales rows (an invoice of several rows counts once; returns are never invoices); returns keep their sign; الصافي = sales + returns. All Transactions has no selected day: the sheet says so and holds only a zero total. Black-and-white design and print setup (A4 landscape, black and white, one page wide, one page high up to 25 rows, rows 1-2 repeated) |
+| Pivot for Last Day | the last sheet: the selected reference date only (never today's date, never other days), one row per representative and customer (Cover order, customers by name; the customer name is the CSV customer name, column G, of the customer's first row with one - never Main Data; the code when there is none): اسم المندوب، العميل، عدد الفواتير، عدد العملاء، إجمالي المبيعات، إجمالي المرتجعات، الصافي (عدد العملاء: blank on a customer row; on `إجمالي <المندوب>` the distinct customer codes of that representative - by code, never by name, each once; on `الإجمالي العام` the distinct customer codes of the whole day, never the sum of the subtotals; the reconciliation recounts them from the raw source rows); after each representative's customers its subtotal `إجمالي <المندوب>` (bold, strong black borders), then `الإجمالي العام` (= the sum of the subtotals). Row 1 shows `تاريخ تشغيل التقرير:` = the RUN date (the computer's date when Task 5 was run, the same moment that names the run folder) and then the transactions' day (the selected reference date) - two different dates. عدد الفواتير = the customer's distinct documents of the day, sales AND returns, identified by `نوع المستند` + `رقم المستند` (a sale and a return with the same number are two documents; the rows of one document, also when it is in several files, count once; a row without a number is a document of its own); a document counts only when at least one of its rows has a non-zero `صافى` (column T) - a document whose rows are all zero is not counted. The count never changes an amount: sales and returns are the sum of every row, zero rows and repeated rows included. A subtotal / الإجمالي العام adds its customers' documents. The reconciliation recounts the documents from the raw source cells (type, number, صافى, date, customer -> Main Data) and names any missing or extra document; returns keep their sign; الصافي = sales + returns. All Transactions has no selected day: the sheet says so and holds only a zero total. Black-and-white design and print setup (A4 landscape, black and white, one page wide, one page high up to 25 rows, rows 1-2 repeated) |
 
 In Cover, the customers inside / outside the 224 list are the customers with a sale (as إجمالي
 العملاء المميزين) split by the 224-code list; صافي = إجمالي البيع + إجمالي المرتجع (returns keep their
@@ -225,14 +225,27 @@ always in the cells.
 Cover groups, in this exact order:
 
 1. اون لاين، الاداره، هند محمد رضا، اسلام حمد كمال محمد، سامح السيد محمود احم، داليا صلاح الدين فكر،
-   سميرة محمد اسماعيل، محمود الشيمي، د هاني، ندا عبد الناصر طه → `إجمالي المباشر`
+   سميرة محمد اسماعيل، محمود الشيمي، ندا عبد الناصر طه، د هاني → `إجمالي المباشر`
 2. هشام احمد محمد، ابراهيم سلام، رامي رأفت يوقيم، محمد رأفت شحاتة محمد، احمد محمد علام محمد،
    احمد محمود موسي، احمد الحريري → `إجمالي الوكلاء`
-3. every other row (a name Main Data adds, `غير محدد`, `غير مسجل`) → `إجمالي المجموعة الثالثة`
+3. every other row with transactions (a name Main Data adds, `غير محدد`) and `غير مسجل` (only when
+   shown) → `إجمالي المجموعة الثالثة`; no third group and no third subtotal when it has no row
 
-`د هاني` is in المباشر in Cover only (also without transactions); تقرير المندوبين and the sheet order
-keep him in the third group. No representative is ever hidden: one without transactions keeps a row
-of zeros with its target, and its target stays in the subtotal and the total. A subtotal sums the
+The groups are defined once (`cover_groups`) and used by Cover, تقرير المندوبين, the representative
+sheet order and the Pivot order: `د هاني` (`DIRECT_ADDITION`) is always the last row of المباشر, right
+above `إجمالي المباشر`, exactly once, also without transactions (then a row of zeros and an empty
+sheet). A representative of the two fixed lists is never hidden: one without transactions keeps a row
+of zeros with its target, and its target stays in the subtotal and the total.
+
+**Unregistered customers are shown only when they matter.** `عملاء غير مسجلين` (تقرير القطاعات,
+تقرير المندوبين), `غير مسجل` (Cover) and the third-group subtotal that would hold only it appear only
+when at least one unregistered customer has a transaction with a non-zero `صافى` (`unregistered_shown`,
+decided on the transactions, never on a placeholder row). Otherwise none of these rows is written - no
+blank row, no zero-only row or subtotal - and the sheet `العملاء غير المسجلين` holds the single line
+`لا يوجد عملاء غير مسجلين في بيانات هذا التقرير` instead of a zero total. Unregistered transactions whose
+`صافى` are all zero are real rows: they stay in Master Data and in their own `غير مسجل` sheet (and the
+Pivot), and `الإجمالي العام` still counts them (its amounts and customers are all transactions, unchanged
+either way). A subtotal sums the
 group's amounts and targets and counts the **distinct** customers of the group (never a sum of the
 rows); `الإجمالي العام` counts the distinct customers of the whole report. Cover is black and white:
 grey bold header, black borders, light-grey stripes, subtotals grey with a strong border,

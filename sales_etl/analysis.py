@@ -45,6 +45,9 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from sales_etl.config import (
     COL_CUSTOMER,
+    COL_DOC_NO,
+    COL_DOC_TYPE,
+    COL_NET,
     DOC_TYPE_RETURNS,
     DOC_TYPE_SALES,
     PROJECT_ROOT,
@@ -103,9 +106,11 @@ COVER_GROUPS: tuple[tuple[str, ...], ...] = (
      "احمد محمود موسي", "احمد الحريري"),
 )
 SUBTOTAL_LABELS: tuple[str, ...] = ("إجمالي المباشر", "إجمالي الوكلاء", "إجمالي المجموعة الثالثة")  # Cover
-#: Cover only: this representative is shown in المباشر, right after the second name, whatever group
-#: تقرير المندوبين gives him (there he stays in the third group)
-COVER_DIRECT_ADDITION: tuple[str, str] = ("د هاني", "محمود الشيمي")
+#: a direct representative outside the fixed Main Data list: always in المباشر, as its last row (right above
+#: إجمالي المباشر) in every grouped summary - Cover, تقرير المندوبين - and in the representative sheet order
+DIRECT_ADDITION = "د هاني"
+#: العملاء غير المسجلين when no unregistered customer has a non-zero amount (no fake zero total)
+NO_UNREGISTERED_NOTE = "لا يوجد عملاء غير مسجلين في بيانات هذا التقرير"
 #: هدف العملاء of each representative in Cover (fixed business targets; never derived from the data).
 #: A representative not listed here has no target: Cover shows NO_TARGET and leaves it out of the percentage.
 COVER_TARGETS: dict[str, int] = {
@@ -159,8 +164,9 @@ MASTER_COLUMNS: tuple[str, ...] = (
 )
 PIVOT_SUBTOTAL_PREFIX = "إجمالي "                 # + the representative: its subtotal row in the pivot
 PIVOT_RUN_DATE_LABEL = "تاريخ تشغيل التقرير"      # the pivot shows the RUN date (started_at), not the selected day
-PIVOT_COLUMNS: tuple[str, ...] = ("اسم المندوب", "العميل", "عدد الفواتير", "إجمالي المبيعات", "إجمالي المرتجعات",
-                                   "الصافي")
+PIVOT_COLUMNS: tuple[str, ...] = ("اسم المندوب", "العميل", "عدد الفواتير", "عدد العملاء", "إجمالي المبيعات",
+                                   "إجمالي المرتجعات", "الصافي")
+PIVOT_CUSTOMERS_COLUMN = PIVOT_COLUMNS.index("عدد العملاء")  # blank on customer rows; distinct codes on totals
 COVER_COLUMNS: tuple[str, ...] = (
     "المندوب", "إجمالي البيع", "إجمالي المرتجع", "صافي", "هدف العملاء", "عدد العملاء داخل قائمة الـ224 كود",
     "عدد العملاء خارج قائمة الـ224 كود", "نسبة تحقيق هدف العملاء",
@@ -380,7 +386,8 @@ class MasterRow:
     yesterday: bool
     sector_row: str
     rep_row: str
-    doc_no: str = ""  # رقم المستند (Pivot for Last Day counts distinct sales documents); not written
+    doc_no: str = ""  # رقم المستند (Pivot for Last Day counts distinct documents); not written
+    source: str = ""  # "file:line" of the source row: identifies a row without a رقم المستند; not written
 
     @property
     def sales(self) -> Decimal:
@@ -426,6 +433,9 @@ class AnalysisResult:
     direct: Amounts = field(default_factory=Amounts)  # independent: no mapping involved
     #: (document type text, date, customer code as read) of every parsed row: the independent customer recount
     source_rows: list[tuple[str, date, str]] = field(default_factory=list)
+    #: raw cells of every parsed row, for the independent document recount of Pivot for Last Day:
+    #: (file, line, date, نوع المستند, رقم المستند, العميل code, CSV name (column G), صافى (column T)) as text
+    source_docs: list[tuple[str, int, date, str, str, str, str, str]] = field(default_factory=list)
     master: list[MasterRow] = field(default_factory=list)  # Master Data, in file and line order
     after_date_rows: int = 0
     other_type_rows: int = 0
@@ -469,7 +479,8 @@ class AnalysisResult:
     def extra_labels(self) -> tuple[list[str], list[str]]:
         """Sector / representative values in Main Data that are not in the fixed lists."""
         return ([k for k in self.sectors if k not in SECTORS and k != UNREGISTERED],
-                [k for k in self.representatives if k not in REPORT_REPRESENTATIVES and k != UNREGISTERED])
+                [k for k in self.representatives if k not in REPORT_REPRESENTATIVES and k != UNREGISTERED
+                 and canonical(k) != canonical(DIRECT_ADDITION)])
 
 
 def _add_file(path: Path, config: PipelineConfig, result: AnalysisResult) -> GroupFile:
@@ -495,6 +506,11 @@ def _add_file(path: Path, config: PipelineConfig, result: AnalysisResult) -> Gro
     item.transactions, item.rejected_rows = len(parsed.transactions), len(parsed.rejected)
     customers = result.main_data.customers
     result.source_rows += [(t.doc_type, t.txn_date, t.customer) for t in parsed.transactions]
+    columns = raw.column_index
+    i_type, i_doc, i_code, i_net = columns[COL_DOC_TYPE], columns.get(COL_DOC_NO), columns[COL_CUSTOMER], columns[COL_NET]
+    result.source_docs += [(t.source_file, t.line_no, t.txn_date, _cell(t.cells, i_type), _cell(t.cells, i_doc),
+                            _cell(t.cells, i_code), _cell(t.cells, i_name), _cell(t.cells, i_net))
+                           for t in parsed.transactions]
     for t in parsed.transactions:
         if t.category not in (Category.SALES, Category.RETURNS):
             result.other_type_rows += 1
@@ -526,18 +542,29 @@ def _add_file(path: Path, config: PipelineConfig, result: AnalysisResult) -> Gro
             t.txn_date, _master_label(representative), _master_label(sector), key,
             t.cells[i_name] if i_name < len(t.cells) else "", t.net,
             FIXED_IN_LABEL if key in result.fixed_codes else FIXED_OUT_LABEL,
-            t.category, yesterday, sector, representative, doc_no=t.doc_no))
+            t.category, yesterday, sector, representative, doc_no=t.doc_no, source=f"{t.source_file}:{t.line_no}"))
     return item
+
+
+def _cell(cells: Sequence[str], index: int | None) -> str:
+    return cells[index] if index is not None and index < len(cells) else ""
 
 
 def _code_key(code: str) -> tuple[int, int | str]:
     return (0, int(code)) if code.isdigit() else (1, code)
 
 
-def _ordered(groups: dict[str, Amounts], fixed: Sequence[str]) -> list[str]:
-    """The fixed list first, then any extra Main Data values, then عملاء غير مسجلين (always last)."""
+def unregistered_shown(result: AnalysisResult) -> bool:
+    """عملاء غير مسجلين is shown in the summaries (تقرير القطاعات, تقرير المندوبين, Cover, العملاء غير المسجلين)
+    only when an unregistered customer has a transaction with a non-zero صافى - decided on the transactions,
+    never on a placeholder row. Zero-only unregistered transactions stay in Master Data (and its sheet)."""
+    return any(r.net != 0 for r in result.master if r.rep_row == UNREGISTERED)
+
+
+def _ordered(groups: dict[str, Amounts], fixed: Sequence[str], unregistered: bool = True) -> list[str]:
+    """The fixed list first, then any extra Main Data values, then عملاء غير مسجلين (last, when ``unregistered``)."""
     extras = sorted(k for k in groups if k not in fixed and k != UNREGISTERED)
-    return [*fixed, *extras, UNREGISTERED]
+    return [*fixed, *extras, *([UNREGISTERED] if unregistered else [])]
 
 
 def _with_total(detail: list[list[Any]], first_money_col: int, counts: Sequence[int] = ()) -> list[list[Any]]:
@@ -554,31 +581,40 @@ def _with_total(detail: list[list[Any]], first_money_col: int, counts: Sequence[
 
 
 def sector_table(result: AnalysisResult) -> list[list[Any]]:
-    groups = {**result.sectors, UNREGISTERED: result.sectors.get(UNREGISTERED, Amounts())}
+    """The 8 sectors (always), any extra Main Data sector, عملاء غير مسجلين only when :func:`unregistered_shown`,
+    then الإجمالي العام (all transactions: unchanged whether that row is shown or not)."""
+    groups = {name: a for name, a in result.sectors.items() if name != UNREGISTERED}
+    shown = unregistered_shown(result)
+    if shown:
+        groups[UNREGISTERED] = result.sectors[UNREGISTERED]
     fixed = result.fixed_codes
-    return _with_total([[name, *groups[name].values(result.mode), *groups[name].counts(result.mode, fixed)]
-                        for name in _ordered(groups, SECTORS)], 1, result.direct.counts(result.mode, fixed))
+    return _with_total([[name, *groups.get(name, Amounts()).values(result.mode),
+                         *groups.get(name, Amounts()).counts(result.mode, fixed)]
+                        for name in _ordered(groups, SECTORS, shown)], 1, result.direct.counts(result.mode, fixed))
 
 
 def representative_table(result: AnalysisResult) -> list[list[Any]]:
-    groups = {**result.representatives, UNREGISTERED: result.representatives.get(UNREGISTERED, Amounts())}
+    """The representative rows of the summaries (:func:`cover_groups` order), then الإجمالي العام."""
     fixed = result.fixed_codes
-    return _with_total([[name, *groups[name].values(result.mode), *groups[name].counts(result.mode, fixed)]
-                        for name in representative_rows(result)], 1, result.direct.counts(result.mode, fixed))
+    labels = [label for group in cover_groups(result) for label in group]
+    return _with_total([[name, *result.representatives.get(name, Amounts()).values(result.mode),
+                         *result.representatives.get(name, Amounts()).counts(result.mode, fixed)]
+                        for name in labels], 1, result.direct.counts(result.mode, fixed))
 
 
 def representative_display_table(result: AnalysisResult) -> list[list[Any]]:
-    """تقرير المندوبين as written: the rows in Cover order, each group followed by its subtotal (amounts summed,
-    distinct customers of the group; the third subtotal only when that group has transactions), then
-    الإجمالي العام."""
+    """تقرير المندوبين as written: the rows in :func:`cover_groups` order (المباشر ending with DIRECT_ADDITION),
+    each group followed by its subtotal (amounts summed, distinct customers of the group; the third group and its
+    subtotal only when it has a row to show), then الإجمالي العام."""
     *detail, total = representative_table(result)
     by_label = {row[0]: row for row in detail}
     rows: list[list[Any]] = []
     for group, label in zip(cover_groups(result), REP_SUBTOTAL_LABELS):
+        if not group:
+            continue
         rows += [by_label[name] for name in group]
         merged = _merged([result.representatives.get(name, Amounts()) for name in group])
-        if label != REP_SUBTOTAL_LABELS[2] or merged.rows:
-            rows.append([label, *merged.values(result.mode), *merged.counts(result.mode, result.fixed_codes)])
+        rows.append([label, *merged.values(result.mode), *merged.counts(result.mode, result.fixed_codes)])
     return [*rows, total]
 
 
@@ -588,9 +624,17 @@ def rep_subtotal_rows(rows: list[list[Any]]) -> set[int]:
 
 
 def missing_table(result: AnalysisResult) -> list[list[Any]]:
+    """العملاء غير المسجلين: every unregistered customer code with its الإجمالي العام when :func:`unregistered_shown`;
+    otherwise one note row (NO_UNREGISTERED_NOTE) - never a zero-only total."""
+    if not unregistered_shown(result):
+        return [[NO_UNREGISTERED_NOTE, *[""] * (len(MISSING_COLUMNS) - 1)]]
     rows = [[m.code, m.name, m.amounts.sales, m.amounts.returns, m.amounts.net]
             for m in sorted(result.missing.values(), key=lambda m: _code_key(m.code))]
-    return _with_total(rows, 2) if rows else [[GRAND_TOTAL, "", ZERO, ZERO, ZERO]]
+    return _with_total(rows, 2)
+
+
+def missing_is_note(rows: list[list[Any]]) -> bool:
+    return len(rows) == 1 and rows[0][0] == NO_UNREGISTERED_NOTE
 
 
 def master_rows(result: AnalysisResult) -> list[MasterRow]:
@@ -598,18 +642,34 @@ def master_rows(result: AnalysisResult) -> list[MasterRow]:
     return list(result.master)
 
 
+def _direct_addition_label(result: AnalysisResult) -> str:
+    """DIRECT_ADDITION as Main Data spells it (when it has transactions), else the constant."""
+    return next((k for k in result.representatives if canonical(k) == canonical(DIRECT_ADDITION)), DIRECT_ADDITION)
+
+
 def cover_groups(result: AnalysisResult) -> list[list[str]]:
-    """Row labels of تقرير المندوبين by Cover group: the two fixed groups in their order, then every
-    other row (extra Main Data names, غير محدد, غير مسجل) in the order of تقرير المندوبين."""
-    named = {label for group in COVER_GROUPS for label in group}
-    others = [label for label in _ordered({**result.representatives, UNREGISTERED: Amounts()}, REPORT_REPRESENTATIVES)
+    """The representative groups of every grouped summary (Cover, تقرير المندوبين): المباشر = the fixed list then
+    DIRECT_ADDITION (always, also without transactions: right above إجمالي المباشر), الوكلاء = the fixed list, then
+    every other row with transactions (extra Main Data names, غير محدد) and عملاء غير مسجلين only when
+    :func:`unregistered_shown`. Each label is in exactly one group."""
+    addition = _direct_addition_label(result)
+    named = {label for group in COVER_GROUPS for label in group} | {addition}
+    others = [label for label in _ordered(result.representatives, REPORT_REPRESENTATIVES, unregistered_shown(result))
               if label not in named]
-    return [*(list(group) for group in COVER_GROUPS), others]
+    return [[*COVER_GROUPS[0], addition], list(COVER_GROUPS[1]), others]
+
+
+#: kept for the callers of the former Cover-only grouping: Cover and تقرير المندوبين use the same groups
+cover_display_groups = cover_groups
 
 
 def representative_rows(result: AnalysisResult) -> list[str]:
-    """Representative row labels in Cover order: the representative sheets follow it."""
-    return [label for group in cover_groups(result) for label in group]
+    """Representative sheet labels in Cover order; عملاء غير مسجلين also when it has (zero-value) transactions but
+    is hidden from the summaries - every Master Data transaction keeps a representative sheet."""
+    labels = [label for group in cover_groups(result) for label in group]
+    if UNREGISTERED not in labels and any(r.rep_row == UNREGISTERED for r in result.master):
+        labels.append(UNREGISTERED)
+    return labels
 
 
 def _merged(parts: Sequence[Amounts]) -> Amounts:
@@ -625,17 +685,6 @@ def _merged(parts: Sequence[Amounts]) -> Amounts:
         total.customers_p |= a.customers_p
         total.customers_r |= a.customers_r
     return total
-
-
-def cover_display_groups(result: AnalysisResult) -> list[list[str]]:
-    """The Cover groups: those of :func:`cover_groups`, with ``COVER_DIRECT_ADDITION`` moved into المباشر
-    (after its anchor) - also when he has no transactions. تقرير المندوبين keeps :func:`cover_groups`."""
-    direct, agents, others = cover_groups(result)
-    name, after = COVER_DIRECT_ADDITION
-    label = next((x for x in others if canonical(x) == canonical(name)), name)
-    direct = list(direct)
-    direct.insert(direct.index(after) + 1, label)
-    return [direct, list(agents), [x for x in others if x != label]]
 
 
 def cover_target(label: str) -> int | None:
@@ -656,14 +705,16 @@ def _cover_row(label: str, a: Amounts, result: AnalysisResult, target: int | Non
 
 
 def cover_table(result: AnalysisResult) -> list[list[Any]]:
-    """Cover, in COVER_COLUMNS order: every representative row (never hidden, also at zero), its group's subtotal
-    after each group, then الإجمالي العام. Amounts as in تقرير المندوبين; the customers inside / outside the 224
+    """Cover, in COVER_COLUMNS order: every representative row of :func:`cover_groups` (the fixed ones also at
+    zero), its group's subtotal after each group (the third group only when it has a row), then الإجمالي العام. Amounts as in تقرير المندوبين; the customers inside / outside the 224
     list are the distinct sales customers (as إجمالي العملاء المميزين); the target comes from COVER_TARGETS.
     A subtotal / the total: summed amounts and targets, distinct customers, and the percentage of the summed
     inside customers of the representatives that have a target over their summed targets (never a sum of %)."""
     rows: list[list[Any]] = []
     grand_target = grand_inside = 0
-    for group, subtotal in zip(cover_display_groups(result), SUBTOTAL_LABELS):
+    for group, subtotal in zip(cover_groups(result), SUBTOTAL_LABELS):
+        if not group:
+            continue
         parts, sub_target, sub_inside = [], 0, 0
         for name in group:
             a = result.representatives.get(name, Amounts())
@@ -716,12 +767,21 @@ def _pivot_groups(result: AnalysisResult) -> dict[tuple[str, str], dict[str, Any
                                                         sales=ZERO, returns=ZERO))
         if not g["name"] and r.name:
             g["name"] = r.name
-        if r.category is Category.SALES:
-            g["invoices"].add(r.doc_no)
+        if r.net != 0:                       # a document counts when one of its rows has a non-zero صافى
+            g["invoices"].add(pivot_document(r.category, r.doc_no, r.source))
+        if r.category is Category.SALES:     # the amounts: every row, as before (zero rows and repeats included)
             g["sales"] += r.net
         else:
             g["returns"] += r.net
     return groups
+
+
+def pivot_document(category: Category, doc_no: str, source: str) -> tuple[str, str]:
+    """Identity of a document in Pivot for Last Day: (نوع المستند, رقم المستند) - a sale and a return with the same
+    number are two documents; the rows of one document (also from several files) are one. A row without a number
+    is a document of its own (its file and line), so blank numbers never merge."""
+    number = ascii_digits(clean_cell(doc_no))
+    return (DOC_TYPE_SALES if category is Category.SALES else DOC_TYPE_RETURNS), number or f"#{source}"
 
 
 def pivot_subtotal_label(representative: str) -> str:
@@ -730,9 +790,13 @@ def pivot_subtotal_label(representative: str) -> str:
 
 def pivot_table(result: AnalysisResult) -> list[list[Any]]:
     """Pivot for Last Day: for each representative (Cover order) its customers (by name) on the selected
-    reference date only, then its subtotal; at the end الإجمالي العام. عدد الفواتير = distinct sales document
-    numbers (رقم المستند; a return is never an invoice); sales and returns keep their signs; الصافي = sales +
-    returns. Without a reference date (all transactions) there is no selected day: only a zero total."""
+    reference date only, then its subtotal; at the end الإجمالي العام. عدد الفواتير = the customer's distinct
+    documents (نوع المستند + رقم المستند, sales AND returns) with at least one row whose صافى is not zero; a
+    subtotal / the total adds its customers' documents. عدد العملاء: blank on a customer row; on a subtotal the
+    distinct customer codes of that representative, on الإجمالي العام the distinct customer codes of the whole day
+    (a code under two representatives counts once - never the sum of the subtotals). Sales and returns keep their
+    signs (every row, also zero rows); الصافي = sales + returns. Without a reference date (all transactions) there
+    is no selected day: only a zero total."""
     groups = _pivot_groups(result)
     order = {label: i for i, label in enumerate(representative_rows(result))}
     rows: list[list[Any]] = []
@@ -742,12 +806,14 @@ def pivot_table(result: AnalysisResult) -> list[list[Any]]:
                       key=lambda item: (item[1]["name"] or item[0], item[0]))
         sub = [0, ZERO, ZERO]
         for code, g in mine:
-            rows.append([g["rep"], g["name"] or code, len(g["invoices"]), g["sales"], g["returns"],
+            rows.append([g["rep"], g["name"] or code, len(g["invoices"]), "", g["sales"], g["returns"],
                          g["sales"] + g["returns"]])
             sub = [sub[0] + len(g["invoices"]), sub[1] + g["sales"], sub[2] + g["returns"]]
-        rows.append([pivot_subtotal_label(mine[0][1]["rep"]), "", sub[0], sub[1], sub[2], sub[1] + sub[2]])
+        customers = len({code for code, _ in mine})
+        rows.append([pivot_subtotal_label(mine[0][1]["rep"]), "", sub[0], customers, sub[1], sub[2], sub[1] + sub[2]])
         totals = [totals[0] + sub[0], totals[1] + sub[1], totals[2] + sub[2]]
-    return [*rows, [GRAND_TOTAL, "", totals[0], totals[1], totals[2], totals[1] + totals[2]]]
+    everyone = len({code for _, code in groups})
+    return [*rows, [GRAND_TOTAL, "", totals[0], everyone, totals[1], totals[2], totals[1] + totals[2]]]
 
 
 def pivot_subtotal_rows(rows: list[list[Any]]) -> set[int]:
@@ -834,8 +900,17 @@ def reconcile(result: AnalysisResult) -> list[str]:
     sector_rows, rep_rows, missing_rows = sector_table(result), representative_table(result), missing_table(result)
     width = len(result.columns)
 
-    for name, rows, first, end in ((SHEET_SECTORS, sector_rows, 1, 1 + width), (SHEET_REPS, rep_rows, 1, 1 + width),
-                                   (SHEET_MISSING, missing_rows, 2, len(missing_rows[-1]))):
+    shown = unregistered_shown(result)
+    hidden = result.sectors.get(UNREGISTERED, Amounts()) if not shown else Amounts()  # zero-only: not in a row
+    if shown == missing_is_note(missing_rows):
+        problems.append(f"{SHEET_MISSING}: shown {not missing_is_note(missing_rows)} but unregistered customers with "
+                        f"a non-zero amount: {shown}")
+    if hidden.sales or hidden.returns or any(r.net for r in result.master if r.rep_row == UNREGISTERED and not shown):
+        problems.append(f"'{UNREGISTERED}' hidden although it has a non-zero amount")
+    tables = [(SHEET_SECTORS, sector_rows, 1, 1 + width), (SHEET_REPS, rep_rows, 1, 1 + width)]
+    if not missing_is_note(missing_rows):
+        tables.append((SHEET_MISSING, missing_rows, 2, len(missing_rows[-1])))
+    for name, rows, first, end in tables:
         *detail, total = rows
         labels = [r[0] for r in detail]
         if len(labels) != len(set(labels)):
@@ -851,9 +926,15 @@ def reconcile(result: AnalysisResult) -> list[str]:
     if totals[SHEET_SECTORS][1:1 + width] != expected:
         problems.append(f"grand totals {totals[SHEET_SECTORS][1:]} differ from the direct sum of all "
                         f"transactions {expected}")
-    missing_total = missing_rows[-1][2:]
+    missing_total = [ZERO] * 3 if missing_is_note(missing_rows) else missing_rows[-1][2:]
     for name, rows in ((SHEET_SECTORS, sector_rows), (SHEET_REPS, rep_rows)):
-        row = next(r for r in rows if r[0] == UNREGISTERED)
+        row = next((r for r in rows if r[0] == UNREGISTERED), None)
+        if (row is not None) != shown:
+            problems.append(f"{name}: row '{UNREGISTERED}' shown {row is not None}, expected {shown}")
+        if row is None:
+            if hidden.sales or hidden.returns:
+                problems.append(f"{name}: hidden '{UNREGISTERED}' has amounts")
+            continue
         amounts = row[1:1 + width]
         sales, returns, net = (amounts[2], amounts[5], amounts[6]) if result.mode == MODE_YESTERDAY else amounts
         if [sales, returns, net] != missing_total:
@@ -875,18 +956,20 @@ def reconcile(result: AnalysisResult) -> list[str]:
         if rows[-1][1 + width:] != union.counts(result.mode, result.fixed_codes):
             problems.append(f"{name}: grand total customer counts {rows[-1][1 + width:]} differ from the distinct "
                             f"customers of its rows {union.counts(result.mode, result.fixed_codes)}")
-        # Main Data gives each code one sector and one representative, so no customer may be in two rows
-        for col in range(1 + width, len(rows[-1])):
-            if sum(r[col] for r in rows[:-1]) != rows[-1][col]:
+        # Main Data gives each code one sector and one representative, so no customer may be in two rows; the
+        # customers of a hidden zero-only unregistered row stay in الإجمالي العام (all transactions)
+        hidden_counts = hidden.counts(result.mode, result.fixed_codes)
+        for i, col in enumerate(range(1 + width, len(rows[-1]))):
+            if sum(r[col] for r in rows[:-1]) + hidden_counts[i] != rows[-1][col]:
                 problems.append(f"{name}: a customer is counted in more than one row (column {col + 1})")
         total_col = 1 + width + result.count_columns.index(TOTAL_CUSTOMERS_COLUMN)
         for row in rows:  # in the 224 codes + outside them = إجمالي العملاء المميزين, in every row
             if row[total_col + 1] + row[total_col + 2] != row[total_col]:
                 problems.append(f"{name}: '{row[0]}' {FIXED_COLUMNS[0]} {row[total_col + 1]} + {FIXED_COLUMNS[1]} "
                                 f"{row[total_col + 2]} differ from {TOTAL_CUSTOMERS_COLUMN} {row[total_col]}")
-        unregistered = next(r for r in rows if r[0] == UNREGISTERED)[total_col]
-        if unregistered != sum(1 for k, m in result.missing.items()
-                               if k and (m.amounts.customers_y or m.amounts.customers_p)):
+        row = next((r for r in rows if r[0] == UNREGISTERED), None)
+        if row is not None and row[total_col] != sum(1 for k, m in result.missing.items()
+                                                     if k and (m.amounts.customers_y or m.amounts.customers_p)):
             problems.append(f"{name}: row '{UNREGISTERED}' customer count differs from the {SHEET_MISSING} sheet")
 
     # every row's customer counts vs the independent recount from the source rows (sales only)
@@ -964,6 +1047,9 @@ def reconcile_master(result: AnalysisResult, sector_rows: list[list[Any]], rep_r
             want = groups.pop(row[0], Amounts())
             if row[1:] != [*want.values(result.mode), *want.counts(result.mode, result.fixed_codes)]:
                 problems.append(f"{name}: row '{row[0]}' differs from its {SHEET_MASTER} rows")
+        hidden = groups.pop(UNREGISTERED, None)
+        if hidden is not None and (unregistered_shown(result) or hidden.sales or hidden.returns):
+            problems.append(f"{name}: {SHEET_MASTER} has '{UNREGISTERED}' rows with amounts that the sheet does not show")
         if groups:
             problems.append(f"{name}: {SHEET_MASTER} has rows for {sorted(groups)} that the sheet does not show")
 
@@ -1012,21 +1098,30 @@ def independent_group_counts(result: AnalysisResult, labels: set[str]) -> list[i
 
 
 def reconcile_rep_subtotals(result: AnalysisResult) -> list[str]:
-    """تقرير المندوبين as written: Cover order, the group subtotals (the third only with transactions), each
-    subtotal = the sum of its rows' amounts and an independent recount of its group's distinct customers."""
+    """تقرير المندوبين as written: المباشر (the fixed list, then DIRECT_ADDITION) + its subtotal, الوكلاء + its
+    subtotal, the third group + subtotal only when it has a row (never a zero-only unregistered row), each subtotal
+    = the sum of its rows' amounts and an independent recount of its group's distinct customers."""
     problems: list[str] = []
     rows, groups = representative_display_table(result), cover_groups(result)
     detail = {row[0]: row for row in representative_table(result)[:-1]}
     expected: list[str] = []
     for group, label in zip(groups, REP_SUBTOTAL_LABELS):
-        expected += group
-        if label != REP_SUBTOTAL_LABELS[2] or any(r.rep_row in set(group) for r in result.master):
-            expected.append(label)
+        if group or label != REP_SUBTOTAL_LABELS[2]:
+            expected += [*group, label]
     expected.append(GRAND_TOTAL)
     if [row[0] for row in rows] != expected:
         return [f"{SHEET_REPS}: rows {[row[0] for row in rows]} differ from {expected}"]
-    if groups[:2] != [list(group) for group in COVER_GROUPS]:
-        problems.append(f"{SHEET_REPS}: the first two groups are not {COVER_GROUPS}")
+    labels = [row[0] for row in rows]
+    if [canonical(x) for x in groups[0]] != [canonical(x) for x in (*COVER_GROUPS[0], DIRECT_ADDITION)] \
+            or groups[1] != list(COVER_GROUPS[1]):
+        problems.append(f"{SHEET_REPS}: the groups are not المباشر {[*COVER_GROUPS[0], DIRECT_ADDITION]} and "
+                        f"الوكلاء {list(COVER_GROUPS[1])}")
+    if sum(canonical(x) == canonical(DIRECT_ADDITION) for x in labels) != 1 \
+            or canonical(labels[labels.index(REP_SUBTOTAL_LABELS[0]) - 1]) != canonical(DIRECT_ADDITION):
+        problems.append(f"{SHEET_REPS}: '{DIRECT_ADDITION}' is not once, right above '{REP_SUBTOTAL_LABELS[0]}'")
+    if (UNREGISTERED in labels) != unregistered_shown(result):
+        problems.append(f"{SHEET_REPS}: '{UNREGISTERED}' shown {UNREGISTERED in labels}, expected "
+                        f"{unregistered_shown(result)}")
     width = len(result.columns)
     for group, label in zip(groups, REP_SUBTOTAL_LABELS):
         row = next((r for r in rows if r[0] == label), None)
@@ -1049,23 +1144,25 @@ def _master_amounts(rows: Sequence[MasterRow]) -> list[Decimal]:
 
 
 def reconcile_cover(result: AnalysisResult, rep_rows: list[list[Any]]) -> list[str]:
-    """Cover: its groups (المباشر with COVER_DIRECT_ADDITION, then الوكلاء, then the rest; nobody hidden), each
+    """Cover: its groups (المباشر ending with DIRECT_ADDITION, then الوكلاء, then the rest when it has a row), each
     representative row vs تقرير المندوبين / its Master Data rows / the independent customer recount / COVER_TARGETS,
     each subtotal and الإجمالي العام vs Master Data, an independent recount of the distinct customers of the group /
     report, the summed targets, and the percentage recomputed from those (never a sum of percentages)."""
     problems: list[str] = []
-    rows, groups = cover_table(result), cover_display_groups(result)
+    rows, groups = cover_table(result), [group for group in cover_groups(result)]
     expected: list[str] = []
     for group, subtotal in zip(groups, SUBTOTAL_LABELS):
-        expected += [*(_master_label(label) for label in group), subtotal]
+        if group:
+            expected += [*(_master_label(label) for label in group), subtotal]
     expected.append(GRAND_TOTAL)
     if [r[0] for r in rows] != expected:
         return [f"{SHEET_COVER}: rows {[r[0] for r in rows]} differ from {expected}"]
-    name, after = COVER_DIRECT_ADDITION
-    direct = list(COVER_GROUPS[0])
-    direct.insert(direct.index(after) + 1, name)
+    direct = [*COVER_GROUPS[0], DIRECT_ADDITION]
     if [canonical(x) for x in groups[0]] != [canonical(x) for x in direct] or groups[1] != list(COVER_GROUPS[1]):
         problems.append(f"{SHEET_COVER}: the groups are not المباشر {direct} and الوكلاء {list(COVER_GROUPS[1])}")
+    if (_master_label(UNREGISTERED) in expected) != unregistered_shown(result):
+        problems.append(f"{SHEET_COVER}: '{_master_label(UNREGISTERED)}' shown {_master_label(UNREGISTERED) in expected}"
+                        f", expected {unregistered_shown(result)}")
     if any(_is_excluded(label) for group in groups for label in group):
         problems.append(f"{SHEET_COVER}: {EXCLUDED_REPRESENTATIVE} is shown although she is excluded")
     report = {r[0]: r for r in rep_rows[:-1]}
@@ -1090,6 +1187,8 @@ def reconcile_cover(result: AnalysisResult, rep_rows: list[list[Any]]) -> list[s
 
     position, grand_target, grand_inside = 0, 0, 0
     for group, subtotal in zip(groups, SUBTOTAL_LABELS):
+        if not group:
+            continue
         sub_target = sub_inside = 0
         for label in group:
             row = rows[position]
@@ -1112,7 +1211,7 @@ def reconcile_cover(result: AnalysisResult, rep_rows: list[list[Any]]) -> list[s
               sub_target or None, sub_inside)
         grand_target, grand_inside = grand_target + sub_target, grand_inside + sub_inside
     total = rows[-1]
-    everyone = independent_group_counts(result, shown)
+    everyone = independent_group_counts(result, shown | {UNREGISTERED})  # all transactions, also a hidden zero-only row
     check(total, result.master, [everyone[-3], everyone[-2]], grand_target or None, grand_inside)
     if total[1:4] != [result.direct.sales, result.direct.returns, result.direct.net]:
         problems.append(f"{SHEET_COVER}: grand total amounts {total[1:4]} differ from the report totals")
@@ -1128,62 +1227,108 @@ def reconcile_cover(result: AnalysisResult, rep_rows: list[list[Any]]) -> list[s
     return problems
 
 
+def independent_pivot(result: AnalysisResult) -> dict[tuple[str, str], list[Any]]:
+    """(representative label, customer code) -> [CSV name, documents, sales, returns] of the selected day, rebuilt
+    with a plain loop over the raw source cells (``source_docs``), not from Master Data or :func:`_pivot_groups`:
+    the document type text, the رقم المستند text, the صافى text (column T) parsed again, the customer code mapped
+    through Main Data. A document = (type, number), counted when one of its rows has صافى != 0."""
+    day = result.reference_date
+    out: dict[tuple[str, str], list[Any]] = {}
+    if day is None:
+        return out
+    for source, line, when, kind_text, doc_text, code_text, name, net_text in result.source_docs:
+        kind = clean_cell(kind_text)
+        if when != day or kind not in (DOC_TYPE_SALES, DOC_TYPE_RETURNS):
+            continue
+        code = customer_key(code_text)
+        known = result.main_data.customers.get(code)
+        if known is not None and _is_excluded(known.representative):
+            continue
+        net = Decimal(ascii_digits(clean_cell(net_text)).replace(",", ""))
+        want = out.setdefault((_master_label(known.representative if known else UNREGISTERED), code),
+                              ["", set(), ZERO, ZERO])
+        want[0] = want[0] or clean_cell(name)
+        if net != 0:
+            number = clean_cell(ascii_digits(doc_text))
+            want[1].add((kind, number if number else f"#{source}:{line}"))
+        if kind == DOC_TYPE_SALES:
+            want[2] += net
+        else:
+            want[3] += net
+    return out
+
+
 def reconcile_pivot(result: AnalysisResult) -> list[str]:
-    """Pivot for Last Day vs a separate plain loop over the transactions of the selected day: every customer row
-    (CSV name, distinct sales documents, sales, returns, الصافي), every representative subtotal (placed after its
-    customers) and الإجمالي العام; the day's totals also equal مبيعات / مرتجعات يوم D of the report (``direct``)."""
+    """Pivot for Last Day vs :func:`independent_pivot` (the raw source cells of the selected day): the documents of
+    every customer one by one (missing / extra), every customer row (CSV name, documents, a blank عدد العملاء, sales, returns, الصافي),
+    every representative subtotal (placed after its customers; عدد العملاء = its distinct customer codes, one row
+    each) and الإجمالي العام (عدد العملاء = the distinct codes of the whole day); the day's totals also equal
+    مبيعات / مرتجعات يوم D of the report (``direct``)."""
     problems: list[str] = []
     rows = pivot_table(result)
     *body, total = rows
     subtotals = pivot_subtotal_rows(rows)
     day = result.reference_date
-    expected: dict[tuple[str, str], list[Any]] = {}  # (representative row, code) -> [rep, CSV name, docs, sales, returns]
-    for r in result.master:
-        if day is None or r.day != day:
-            continue
-        want = expected.setdefault((r.rep_row, r.code), [r.representative, "", set(), ZERO, ZERO])
-        want[1] = want[1] or r.name
-        if r.category is Category.SALES:
-            want[2].add(r.doc_no)
-            want[3] += r.net
-        else:
-            want[4] += r.net
-    want_rows = Counter((rep, name or code, len(docs), sales, returns, sales + returns)
+    source = independent_pivot(result)
+    built = {(g["rep"], code): g["invoices"] for (_, code), g in _pivot_groups(result).items()}
+    for key in sorted(set(source) | set(built)):
+        want, got = (source[key][1] if key in source else set()), built.get(key, set())
+        if want - got:
+            problems.append(f"{SHEET_PIVOT}: '{key[0]}' customer {key[1]}: documents missing from عدد الفواتير "
+                            f"{sorted(want - got)[:5]}")
+        if got - want:
+            problems.append(f"{SHEET_PIVOT}: '{key[0]}' customer {key[1]}: extra documents in عدد الفواتير "
+                            f"{sorted(got - want)[:5]}")
+    expected = {key: [key[0], *values] for key, values in source.items()}  # -> [rep, CSV name, docs, sales, returns]
+    want_rows = Counter((rep, name or code, len(docs), "", sales, returns, sales + returns)
                         for (_, code), (rep, name, docs, sales, returns) in expected.items())
     customers = [row for i, row in enumerate(body) if i not in subtotals]
+    for row in customers:
+        if row[PIVOT_CUSTOMERS_COLUMN] not in ("", None):
+            problems.append(f"{SHEET_PIVOT}: customer row '{row[1]}' has عدد العملاء {row[PIVOT_CUSTOMERS_COLUMN]!r}; "
+                            f"it must be blank")
     if Counter(tuple(row) for row in customers) != want_rows:
         problems.append(f"{SHEET_PIVOT}: customer rows differ from the day's transactions: written "
                         f"{sorted(map(tuple, customers), key=str)[:5]}, expected {sorted(want_rows, key=str)[:5]}")
     per_rep: dict[str, list[Any]] = {}
-    for rep, _, docs, sales, returns in expected.values():
-        sub = per_rep.setdefault(rep, [0, ZERO, ZERO])
+    for (_, code), (rep, _, docs, sales, returns) in expected.items():
+        sub = per_rep.setdefault(rep, [0, ZERO, ZERO, set()])
         sub[0] += len(docs)
         sub[1] += sales
         sub[2] += returns
+        sub[3].add(code)                                       # distinct customer codes of the representative
     seen: list[str] = []
     current: set[str] = set()
+    lines = 0
     for i, row in enumerate(body):
         if i not in subtotals:
             current.add(row[0])
+            lines += 1
             continue
         rep = row[0][len(PIVOT_SUBTOTAL_PREFIX):]
-        want = per_rep.get(rep, [0, ZERO, ZERO])
-        if current != {rep} or row[2:] != [want[0], want[1], want[2], want[1] + want[2]]:
+        want = per_rep.get(rep, [0, ZERO, ZERO, set()])
+        want_sub = [want[0], len(want[3]), want[1], want[2], want[1] + want[2]]
+        if current != {rep} or row[2:] != want_sub:
             problems.append(f"{SHEET_PIVOT}: subtotal '{row[0]}' {row[2:]} does not match its customers "
-                            f"{sorted(current)} {[want[0], want[1], want[2], want[1] + want[2]]}")
+                            f"{sorted(current)} {want_sub}")
+        if lines != len(want[3]):
+            problems.append(f"{SHEET_PIVOT}: '{rep}' has {lines} customer rows for {len(want[3])} distinct customer "
+                            f"codes (a customer counted twice or missing)")
         seen.append(rep)
         current = set()
+        lines = 0
     if current or sorted(seen) != sorted(per_rep):
         problems.append(f"{SHEET_PIVOT}: representative subtotals {seen} differ from {sorted(per_rep)}")
-    invoices = len({(code, doc) for (_, code), (_, _, docs, _, _) in expected.items() for doc in docs})
+    invoices = sum(len(docs) for _, _, docs, _, _ in expected.values())  # each customer's own documents
+    everyone = len({code for _, code in expected})                       # distinct codes over the whole day
     sales = sum((v[3] for v in expected.values()), ZERO)
     returns = sum((v[4] for v in expected.values()), ZERO)
-    if total != [GRAND_TOTAL, "", invoices, sales, returns, sales + returns]:
+    if total != [GRAND_TOTAL, "", invoices, everyone, sales, returns, sales + returns]:
         problems.append(f"{SHEET_PIVOT}: الإجمالي العام {total[2:]} differs from the day's transactions "
-                        f"{[invoices, sales, returns, sales + returns]}")
+                        f"{[invoices, everyone, sales, returns, sales + returns]}")
     day_sales, day_returns = (result.direct.sales_y, result.direct.returns_y) if day is not None else (ZERO, ZERO)
-    if (total[3], total[4]) != (day_sales, day_returns):
-        problems.append(f"{SHEET_PIVOT}: الإجمالي العام sales / returns {total[3]} / {total[4]} differ from the report's "
+    if (total[4], total[5]) != (day_sales, day_returns):
+        problems.append(f"{SHEET_PIVOT}: الإجمالي العام sales / returns {total[4]} / {total[5]} differ from the report's "
                         f"day totals {day_sales} / {day_returns}")
     return problems
 
@@ -1209,7 +1354,7 @@ def report_date_title(result: AnalysisResult) -> str:
 
 
 def _layout(ws: Worksheet, headers: Sequence[str], rows: list[list[Any]], *, size: int, cap: int,
-            body_height: int, one_page: bool, title: str) -> None:
+            body_height: int, one_page: bool, title: str, min_width: int = 14, pad: int = 4) -> None:
     """Row 1: ``title`` across the table, aligned left (top left of the printed page); row 2: the header;
     then the rows. Column widths that fit the content, row heights that show wrapped text completely,
     and the print setup: A4 landscape, centred, one page wide, rows 1-2 repeated on every page."""
@@ -1218,7 +1363,7 @@ def _layout(ws: Worksheet, headers: Sequence[str], rows: list[list[Any]], *, siz
     for c, header in enumerate(headers, start=1):
         longest = max((_display_width(row[c - 1]) for row in rows), default=0)
         longest_word = max((len(word) for word in str(header).split()), default=0)
-        width = min(max(round(longest * scale) + 4, round(longest_word * scale) + 4, 14), cap)
+        width = min(max(round(longest * scale) + pad, round(longest_word * scale) + pad, min_width), cap)
         ws.column_dimensions[get_column_letter(c)].width = width
         widths.append(width)
     last_col, last_row = get_column_letter(len(headers)), len(rows) + 2
@@ -1258,51 +1403,110 @@ def _serials(count: int, blanks: Collection[int] = ()) -> list[int | None]:
     return serials
 
 
-def _write_sheet(ws: Worksheet, headers: Sequence[str], rows: list[list[Any]], *, title: str, cover: bool = False,
-                 subtotals: Collection[int] = ()) -> None:
-    """A table with الإجمالي العام last, after the column م, under the ``title`` line; ``subtotals``: indexes
-    of group subtotal rows (no serial number, own style); ``cover``: larger text and taller rows."""
-    size = 13 if cover else 11
+# black-and-white print design of تقرير تحليل المبيعات والمرتجعات (grey shades only, black text and borders)
+_BW_BLACK = Side(style="thin", color="000000")
+_BW_MEDIUM = Side(style="medium", color="000000")
+_BW_HEADER_FILL = PatternFill("solid", fgColor="BFBFBF")      # medium grey header, black bold text (never dark)
+_BW_STRIPE = PatternFill("solid", fgColor="F2F2F2")           # alternating light grey / white rows
+_BW_SUBTOTAL_FILL = PatternFill("solid", fgColor="D9D9D9")
+_BW_TOTAL_FILL = PatternFill("solid", fgColor="BFBFBF")
+_BW_BORDER = Border(left=_BW_BLACK, right=_BW_BLACK, top=_BW_BLACK, bottom=_BW_BLACK)
+_BW_HEADER_BORDER = Border(left=_BW_BLACK, right=_BW_BLACK, top=_BW_MEDIUM, bottom=_BW_MEDIUM)
+_BW_SUBTOTAL_BORDER = Border(left=_BW_BLACK, right=_BW_BLACK, top=_BW_MEDIUM, bottom=_BW_MEDIUM)
+_BW_TOTAL_BORDER = Border(left=_BW_BLACK, right=_BW_BLACK, top=Side(style="double", color="000000"), bottom=_BW_MEDIUM)
+_BW_MARGINS = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.35, header=0.1, footer=0.15)
+_A4_LANDSCAPE_INCHES = (11.69, 8.27)
+_PAGE_FILL = 0.97          # the share of the printable height a filled table takes (room for Excel's rounding)
+_ROW_GROWTH_CAP = 1.8      # a filled row is at most this times its own (content-fitted) height
+
+
+def _table_width_points(ws: Worksheet, columns: int) -> float:
+    """The printed width of the first ``columns`` columns at 100 %: Excel shows a column of width w as
+    trunc(7w + 5) pixels (default 11 pt font), 0.75 pt each."""
+    return sum(int(7 * (ws.column_dimensions[get_column_letter(c)].width or 8.43) + 5) for c in range(1, columns + 1)) * 0.75
+
+
+def _fill_page_height(ws: Worksheet, columns: int, last_row: int, body: Sequence[int]) -> None:
+    """Make a one-page table use the printable height of its A4 landscape page: the scale is set by the width (fit
+    to one page wide); the free height left at that scale is shared equally by the ``body`` rows (data,
+    subtotals, الإجمالي العام - not the title or the header), each at most _ROW_GROWTH_CAP times its own height, so
+    the table never needs a smaller scale and no text is cut."""
+    margins = ws.page_margins
+    width_in, height_in = _A4_LANDSCAPE_INCHES
+    printable_w = (width_in - margins.left - margins.right) * 72
+    printable_h = (height_in - margins.top - margins.bottom) * 72
+    scale = min(1.0, printable_w / _table_width_points(ws, columns))
+    target = printable_h / scale * _PAGE_FILL
+    current = sum(ws.row_dimensions[r].height or 15 for r in range(1, last_row + 1))
+    if current >= target or not body:
+        return
+    extra = (target - current) / len(body)
+    for r in body:
+        height = ws.row_dimensions[r].height or 15
+        ws.row_dimensions[r].height = round(min(height + extra, height * _ROW_GROWTH_CAP), 1)
+
+
+def _write_sheet(ws: Worksheet, headers: Sequence[str], rows: list[list[Any]], *, title: str,
+                 subtotals: Collection[int] = (), fill_page: bool = False) -> None:
+    """A sheet of تقرير تحليل المبيعات والمرتجعات: the column م, the table, الإجمالي العام last, under the ``title``
+    line; ``subtotals``: indexes of group subtotal rows (no serial number). Black-and-white print design (no blue,
+    no dark fill): medium grey header with black bold text, white / very light grey stripes, black text and
+    borders, bold medium-grey subtotals with strong borders, الإجمالي العام a little darker with a double top
+    border; Segoe UI. Print: A4 landscape, one page wide (one page high up to _ONE_PAGE_ROWS rows, otherwise further
+    pages down - never tiny text), minimal margins, centred on the page, rows 1-2 (title and header) repeated on
+    every page, the print area = the table only. ``fill_page``: a one-page table's rows share the free page height
+    (:func:`_fill_page_height`)."""
+    size = 11
     ws.sheet_view.rightToLeft = True
     headers = (SERIAL_COLUMN, *headers)
     rows = [[serial, *row] for serial, row in zip(_serials(len(rows), {*subtotals, len(rows) - 1}), rows)]
     *detail, total = rows
-    header_font = Font(name=_FONT, bold=True, color="FFFFFF", size=size + 1)
-    body_font = Font(name=_FONT, bold=True, size=size)
-    subtotal_font = Font(name=_FONT, bold=True, size=size, color="1F4E78")
-    total_font = Font(name=_FONT, bold=True, size=size + 1, color="1F4E78")
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=2, column=col, value=header)
-        cell.font, cell.fill, cell.border, cell.alignment = header_font, _NAVY, _BORDER, _CENTER
-    for r, values in enumerate(detail, start=3):
-        subtotal = r - 3 in subtotals
-        for c, value in enumerate(values, start=1):
-            cell = ws.cell(row=r, column=c, value=value)
-            cell.alignment = _CENTER
-            if subtotal:
-                cell.font, cell.fill, cell.border = subtotal_font, _SUBTOTAL_FILL, _SUBTOTAL_BORDER
-            else:
-                cell.font, cell.border = body_font, _BORDER
-                if r % 2 == 0:
-                    cell.fill = _STRIPE
-            if isinstance(value, Decimal):
-                cell.number_format = MONEY_FORMAT
-            elif isinstance(value, int):
-                cell.number_format = COUNT_FORMAT
-    last = len(detail) + 3
-    for c, value in enumerate(total, start=1):
-        cell = ws.cell(row=last, column=c, value=value)
-        cell.font, cell.fill, cell.border, cell.alignment = total_font, _TOTAL_FILL, _TOTAL_BORDER, _CENTER
+    header_font = Font(name=_FONT, bold=True, color="000000", size=size + 1)
+    body_font = Font(name=_FONT, bold=True, color="000000", size=size)
+    subtotal_font = Font(name=_FONT, bold=True, color="000000", size=size)
+    total_font = Font(name=_FONT, bold=True, color="000000", size=size + 1)
+
+    def number_format(cell: Any, value: Any) -> None:
         if isinstance(value, Decimal):
             cell.number_format = MONEY_FORMAT
         elif isinstance(value, int):
             cell.number_format = COUNT_FORMAT
-    _layout(ws, headers, rows, size=size, cap=60, body_height=34 if cover else 24,
-            one_page=cover or len(rows) <= _ONE_PAGE_ROWS, title=title)
+
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.font, cell.fill, cell.border, cell.alignment = header_font, _BW_HEADER_FILL, _BW_HEADER_BORDER, _CENTER
+    stripe = False
+    for r, values in enumerate(detail, start=3):
+        subtotal = r - 3 in subtotals
+        if not subtotal:
+            stripe = not stripe
+        for c, value in enumerate(values, start=1):
+            cell = ws.cell(row=r, column=c, value=value)
+            cell.alignment = _CENTER
+            if subtotal:
+                cell.font, cell.fill, cell.border = subtotal_font, _BW_SUBTOTAL_FILL, _BW_SUBTOTAL_BORDER
+            else:
+                cell.font, cell.border = body_font, _BW_BORDER
+                if not stripe:
+                    cell.fill = _BW_STRIPE
+            number_format(cell, value)
+    last = len(detail) + 3
+    for c, value in enumerate(total, start=1):
+        cell = ws.cell(row=last, column=c, value=value)
+        cell.font, cell.fill, cell.border, cell.alignment = total_font, _BW_TOTAL_FILL, _BW_TOTAL_BORDER, _CENTER
+        number_format(cell, value)
+    # widths fitted to the content (the header wraps): the table uses the page width at a readable scale
+    _layout(ws, headers, rows, size=size, cap=48, body_height=22, one_page=len(rows) <= _ONE_PAGE_ROWS, title=title,
+            min_width=7, pad=2)
+    ws.cell(row=1, column=1).font = Font(name=_FONT, bold=True, color="000000", size=size + 2)
     for index in subtotals:
-        ws.row_dimensions[index + 3].height = max(ws.row_dimensions[index + 3].height or 0, 38 if cover else 28)
-    if cover:
-        ws.row_dimensions[last].height = max(ws.row_dimensions[last].height or 0, 44)
+        ws.row_dimensions[index + 3].height = max(ws.row_dimensions[index + 3].height or 0, 26)
+    ws.row_dimensions[last].height = max(ws.row_dimensions[last].height or 0, 28)
+    ws.page_margins = _BW_MARGINS
+    ws.page_setup.blackAndWhite = False   # Excel's B&W mode would drop the grey shading
+    ws.print_options.horizontalCentered = ws.print_options.verticalCentered = True
+    if fill_page and len(rows) <= _ONE_PAGE_ROWS:
+        _fill_page_height(ws, len(headers), last, range(3, last + 1))
     ws.freeze_panes = "A3"
     ws.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{len(detail) + 2}"
 
@@ -1463,7 +1667,8 @@ def write_analysis_report(result: AnalysisResult, path: Path) -> Path:
     title = report_date_title(result)
     for name, (headers, rows) in sheet_tables(result).items():
         subtotals = rep_subtotal_rows(rows) if name == SHEET_REPS else ()
-        _write_sheet(wb.create_sheet(name), headers, rows, title=title, subtotals=subtotals)
+        _write_sheet(wb.create_sheet(name), headers, rows, title=title, subtotals=subtotals,
+                     fill_page=name == SHEET_REPS)
     wb.save(path)
     return path
 
@@ -1616,7 +1821,9 @@ def _saved_group_sums(where: str, body: list[list[Any]], subtotal_labels: Sequen
 
 def _verify_pivot(where: str, saved: list[list[Any]], rows: list[list[Any]], title: str) -> list[str]:
     """Saved Pivot for Last Day: title, header, every cell, and on the saved values: each representative subtotal =
-    the sum of its customer rows, الإجمالي العام = the sum of the subtotals, الصافي = sales + returns in every row."""
+    the sum of its customer rows (documents and amounts) and its عدد العملاء = its number of customer rows, عدد
+    العملاء blank on every customer row, الإجمالي العام = the sum of the subtotals (documents and amounts) with at
+    most as many customers as customer rows, الصافي = sales + returns in every row."""
     problems = _check_title(where, saved, title)
     table = saved[1:]
     if not table or tuple(table[0][:len(PIVOT_COLUMNS)]) != PIVOT_COLUMNS:
@@ -1635,21 +1842,33 @@ def _verify_pivot(where: str, saved: list[list[Any]], rows: list[list[Any]], tit
             if bad:
                 problems.append(f"{where}: row {line} {header} {g!r} differs from {w!r}")
     subtotals = pivot_subtotal_rows(rows)
-    group, everyone = [ZERO] * 4, [ZERO] * 4
+    sums = (2, 4, 5, 6)                                      # عدد الفواتير, sales, returns, الصافي
+    k = PIVOT_CUSTOMERS_COLUMN
+    group, everyone, members, customer_rows = [ZERO] * 4, [ZERO] * 4, 0, 0
     for index, row in enumerate(body[:-1]):
-        amounts = [_money(row[col]) for col in (2, 3, 4, 5)]
+        amounts = [_money(row[col]) for col in sums]
         if index in subtotals:
             if any(abs(a - b) > _TOLERANCE * 20 for a, b in zip(group, amounts)):
                 problems.append(f"{where}: row {index + 3} saved '{row[0]}' differs from the sum of its customers {group}")
+            if row[k] != members:
+                problems.append(f"{where}: row {index + 3} saved '{row[0]}' عدد العملاء {row[k]!r} is not its "
+                                f"{members} customer rows")
             everyone = [a + b for a, b in zip(everyone, amounts)]
-            group = [ZERO] * 4
+            group, members = [ZERO] * 4, 0
         else:
+            if row[k] not in (None, ""):
+                problems.append(f"{where}: row {index + 3} customer row has عدد العملاء {row[k]!r}; it must be blank")
             group = [a + b for a, b in zip(group, amounts)]
+            members += 1
+            customer_rows += 1
     total = body[-1]
-    if any(abs(a - _money(b)) > _TOLERANCE * max(len(body), 1) for a, b in zip(everyone, total[2:6])):
-        problems.append(f"{where}: saved الإجمالي العام {total[2:6]} differs from the sum of the subtotals {everyone}")
+    if any(abs(a - _money(total[col])) > _TOLERANCE * max(len(body), 1) for a, col in zip(everyone, sums)):
+        problems.append(f"{where}: saved الإجمالي العام {total[2:]} differs from the sum of the subtotals {everyone}")
+    if not isinstance(total[k], int) or not (0 < total[k] <= customer_rows or total[k] == customer_rows == 0):
+        problems.append(f"{where}: saved الإجمالي العام عدد العملاء {total[k]!r} is not between 1 and its "
+                        f"{customer_rows} customer rows")
     for line, row in enumerate(body, start=3):
-        if abs(_money(row[3]) + _money(row[4]) - _money(row[5])) > 2 * _TOLERANCE:
+        if abs(_money(row[4]) + _money(row[5]) - _money(row[6])) > 2 * _TOLERANCE:
             problems.append(f"{where}: row {line} الصافي is not sales + returns")
     if total[0] != GRAND_TOTAL:
         problems.append(f"{where}: last row is not '{GRAND_TOTAL}'")
@@ -1735,6 +1954,10 @@ def verify_analysis_report(result: AnalysisResult) -> list[str]:
                         problems.append(f"{name}: '{want[0]}' customer count {g!r} differs from {w}")
                 elif (g or "") != w:
                     problems.append(f"{name}: cell {g!r} differs from {w!r}")
+        if name == SHEET_MISSING and missing_is_note(rows):
+            if body != [[NO_UNREGISTERED_NOTE, *[None] * (len(headers) - 1)]]:
+                problems.append(f"{name}: saved {body} is not the single note row '{NO_UNREGISTERED_NOTE}'")
+            continue
         first = 2 if name == SHEET_MISSING else 1
         end = len(headers) if name == SHEET_MISSING else 1 + len(result.columns)  # counts are not sums
         problems += _saved_group_sums(name, body, REP_SUBTOTAL_LABELS if name == SHEET_REPS else (),
