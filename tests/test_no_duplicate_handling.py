@@ -48,7 +48,8 @@ def _run(tmp_path, task):
             wb.active.append([400100, "عميل", "الجملة", "الاداره"])
             wb.save(main_data)
             fixed = Workbook()
-            fixed.active.append([400100])
+            fixed.active.append(["كود العميل", "اسم العميل", "الشهر الاعلي قيمه ", "المسئول"])   # as the real file
+            fixed.active.append([400100, "عميل", 0, "الاداره"])
             fixed.save(tmp_path / "fixed code.xlsx")
         args = [*args, "--main-data", str(main_data)]
     return main(["--input-dir", str(tmp_path / "in"), "--output-dir", str(tmp_path / "out"),

@@ -1,4 +1,4 @@
-﻿# Python cache
+# Python cache
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -16,16 +16,20 @@ env/
 !.env.example
 *.pem
 *.key
+# Real business configuration (names, targets): local only. The repository ships config/business.example.json.
+config/*.local.json
 
-# Business data and generated reports
-data/
-input/
-output/
-processed/
-backups/
-duplicates/
-failures/
-state/
+# Business data and generated reports (never committed)
+/data/
+/input/
+/output/
+/processed/
+/failures/
+/duplicates/
+/state/
+/preview_output/
+/التحصيل/
+/backups/
 
 # Business files
 *.csv
@@ -33,7 +37,7 @@ state/
 *.xls
 *.xlsm
 
-# Unreviewed test samples
+# Unreviewed local test samples (real exports must never be committed)
 tests/fixtures/
 
 # IDE files
@@ -42,3 +46,9 @@ tests/fixtures/
 
 # Logs
 *.log
+
+# PyInstaller / build outputs (the application is published as a GitHub Release, not in git)
+build/
+dist/
+build_new/
+*.zip

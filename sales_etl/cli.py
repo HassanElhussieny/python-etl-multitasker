@@ -23,13 +23,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from sales_etl import __version__
-from sales_etl import analysis
+from sales_etl import analysis, fixed_customers
 from sales_etl.amounts import fmt_amount
 from sales_etl.config import (
     DEFAULT_INPUT_DIR,
     DEFAULT_OUTPUT_DIR,
     METRIC_COLUMNS,
     METRIC_KEYS,
+    PROJECT_ROOT,
     ConfigError,
     FileManagementConfig,
     PipelineConfig,
@@ -69,12 +70,16 @@ TASKS: dict[str, str] = {
     TASK_FILE_CUSTOMERS: "عدد العملاء الشهري لكل ملف",
 }
 TASK_PROMPT = "Select task number: "
-REPORT_TYPES: dict[str, str] = {"1": "Yesterday & Previous Days", "2": "All Transactions"}
+REPORT_TYPES: dict[str, str] = {"1": "Yesterday & Previous Days", "2": "All Transactions", "3": "Receivables Update"}
+REPORT_RECEIVABLES = "3"  # task 5 option 3: an independent workflow (sales_etl.receivables)
 REPORT_TYPE_PROMPT = "Select report type: "
 YESTERDAY_PROMPT = "Enter yesterday's date (DD/MM/YYYY): "
 START_DATE_PROMPT = "اكتب تاريخ البداية (DD-MM-YYYY): "
 END_DATE_PROMPT = "اكتب تاريخ النهاية (DD-MM-YYYY): "
 
+
+#: task 5 option 1: the folder of the current collection workbook (report 3's المستحق columns)
+DEFAULT_COLLECTION_DIR = PROJECT_ROOT / fixed_customers.COLLECTION_DIR_NAME
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -90,7 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date", help="task 2: first day of the period, DD-MM-YYYY (included)")
     parser.add_argument("--end-date", help="task 2: last day of the period, DD-MM-YYYY (included)")
     parser.add_argument("--report-type", choices=tuple(REPORT_TYPES),
-                        help="task 5: 1 = yesterday & previous days (needs --ref-date), 2 = all transactions")
+                        help="task 5: 1 = yesterday & previous days (needs --ref-date), 2 = all transactions, "
+                             "3 = receivables update (needs --sales-csv and --receivables)")
+    parser.add_argument("--sales-csv", type=Path, help="task 5 option 3: the Sales CSV file")
+    parser.add_argument("--receivables", type=Path,
+                        help="task 5 option 3: the receivables workbook (كود العميل in column B, المستحق 7-10, "
+                             "المستحق الجديد)")
+    parser.add_argument("--collection-dir", type=Path,
+                        help="task 5 option 1: folder of the current collection workbook (default: "
+                             f"{fixed_customers.COLLECTION_DIR_NAME} in the project root)")
     parser.add_argument("--main-data", type=Path,
                         help=f"task 5: Main Data workbook (default: the single .xlsx in {analysis.DEFAULT_MAIN_DATA_DIR})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
@@ -137,9 +150,11 @@ def choose_task(args: argparse.Namespace, interactive: bool, input_fn: Callable[
                           "it uses every transaction in the file")
     if args.task == TASK_ANALYSIS and period_args:
         raise ConfigError("task 5 takes --ref-date (report type 1) or no date (report type 2)")
-    if (args.report_type is not None or args.main_data is not None) and args.task not in (None, TASK_ANALYSIS):
-        raise ConfigError("--report-type and --main-data belong to task 5")
-    if args.task is None and args.report_type is not None:
+    receivables_args = args.sales_csv is not None or args.receivables is not None
+    if (args.report_type is not None or args.main_data is not None or receivables_args) \
+            and args.task not in (None, TASK_ANALYSIS):
+        raise ConfigError("--report-type, --main-data, --sales-csv and --receivables belong to task 5")
+    if args.task is None and (args.report_type is not None or receivables_args):
         return TASK_ANALYSIS
     if args.task:
         return args.task
@@ -691,6 +706,10 @@ def ask_report_type(input_fn: Callable[[str], str] = input) -> str:
 
 
 def print_analysis_summary(result: analysis.AnalysisResult, problems: list[str]) -> None:
+    """Task 5's summary: reports 1-2 (Reconciliation) and report 3 (Customer report check) each pass or fail on
+    their own lines; ``problems`` = all of them (as verify_task5 returns)."""
+    customer_problems = set(result.customers_problems)
+    problems = [p for p in problems if p not in customer_problems]
     line = "=" * 72
     print(line)
     print(f"Task                     : {TASKS[TASK_ANALYSIS]}")
@@ -727,6 +746,183 @@ def print_analysis_summary(result: analysis.AnalysisResult, problems: list[str])
     for problem in problems:
         print(f"   FAIL  {problem}")
     print(f"Report                   : {result.report_path}")
+    print(f"Representatives report   : {result.reps_report_path}")
+    if result.fixed_customers:
+        print("-" * 72)
+        print(f"Customer report check    : {'PASS' if not result.customers_problems else 'FAIL'}"
+              f"   (report 3, Fixed_Customers_Report{' + report 4, Customers_Not_Worked' if result.mode == analysis.MODE_YESTERDAY else ''})")
+        for problem in result.customers_problems:
+            print(f"   FAIL  {problem}")
+        if result.customers_report_path is not None:
+            start, end = fixed_customers.customers_period(result)
+            print(f"Customer report          : {result.customers_report_path}")
+            print(f"   period {describe_date(start)} - {describe_date(end) if end else 'all of the month'}: "
+                  f"{len(result.fixed_customers)} fixed customers + "
+                  f"{len(fixed_customers.customers_table(result)) - 1 - len(result.fixed_customers)} outside the list")
+        if fixed_customers.collection_enabled(result):
+            stats = fixed_customers.collection_stats(result)
+            print(f"Collection workbook      : {result.collection.path}  (sheet '{result.collection.file.sheet}', "
+                  f"header row {result.collection.file.header_row}, code column B, F = المستحق 7-10, "
+                  f"L = المستحق الجديد)")
+            print(f"   {stats['matched']} of {stats['customers']} report customers matched by code, "
+                  f"{stats['unmatched']} not in the file (cells left empty); {stats['file_customers']} codes in the "
+                  f"file ({stats['file_only']} not in the report), duplicate codes {stats['duplicates']}")
+        if result.not_worked_path is not None:
+            from sales_etl import not_worked
+
+            info = not_worked.counts(result)
+            print(f"Not-worked report        : {result.not_worked_path}")
+            print(f"   {info['customers']} customers with sales = 0 ({info['with_returns']} with returns, "
+                  f"{info['no_returns']} without) on {len(info['per_sheet'])} المسؤول sheets")
+
+
+def _file_arg_or_ask(value: Path | None, name: str, prompt: str, suffixes: tuple[str, ...], interactive: bool,
+                     input_fn: Callable[[str], str]) -> Path:
+    """An existing file with one of ``suffixes``: from the argument, else asked (again while invalid)."""
+    def check(path: Path) -> str | None:
+        if not path.is_file():
+            return f"{name}: no such file: {path}"
+        if path.suffix.lower() not in suffixes:
+            return f"{name}: {path.name} is not a {' / '.join(suffixes)} file"
+        return None
+
+    if value is not None:
+        problem = check(value)
+        if problem:
+            raise ConfigError(problem)
+        return value
+    if not interactive:
+        raise ConfigError(f"{name} is required for report type 3 in non-interactive mode")
+    while True:
+        try:
+            text = input_fn(prompt).strip().strip('"').strip("'")
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise ConfigError(f"Cancelled: no {name} given") from exc
+        path = Path(text)
+        problem = check(path) if text else f"{name}: enter a file path"
+        if problem is None:
+            return path
+        print(f"  {problem}")
+
+
+def print_receivables_summary(result: "receivables.ReceivablesResult") -> None:
+    """Option 3's own summary (it never shares the lines of report types 1-2)."""
+    from sales_etl import receivables
+
+    line = "=" * 72
+    st = result.stats
+    print(line)
+    print(f"Task                     : {TASKS[TASK_ANALYSIS]}")
+    print(f"Report type              : {REPORT_RECEIVABLES}. {REPORT_TYPES[REPORT_RECEIVABLES]}")
+    print(f"Sales CSV                : {result.sales_csv}")
+    print(f"Receivables file         : {result.receivables_path} (sheet '{result.receivables.sheet}', "
+          f"header row {result.receivables.header_row})")
+    print(f"Main Data                : {result.analysis.main_data.path}")
+    if st:
+        print("-" * 72)
+        print(f"Customer codes (CSV)     : {st['csv_codes']}  | found {st['found']} | not found {st['not_found']} "
+              f"| duplicates {st['duplicates']}")
+        if st["missing_codes"]:
+            shown = ", ".join(st["missing_codes"][:20]) + (" ..." if len(st["missing_codes"]) > 20 else "")
+            print(f"   not in the receivables file (left empty): {shown}")
+        print(f"Master Data              : {st['customers']} customers (one row each), {st['transactions']} "
+              "transactions summed")
+        print(f"Sales / returns / net    : {fmt_amount(st['sales'])} / {fmt_amount(st['returns'])} / "
+              f"{fmt_amount(st['net'])}")
+        print(f"{receivables.COL_OLD:<25}: file {fmt_amount(st['source_old'])} | Master Data "
+              f"{fmt_amount(st['master_old'])} | Cover {fmt_amount(st['cover_old'])}")
+        print(f"{receivables.COL_NEW:<25}: file {fmt_amount(st['source_new'])} | Master Data "
+              f"{fmt_amount(st['master_new'])} | Cover {fmt_amount(st['cover_new'])}")
+        for name, count, old, new in st["per_representative"]:
+            if count:
+                print(f"   {name:<24} {count:>4} customers  {fmt_amount(old):>18}  {fmt_amount(new):>18}")
+    print("-" * 72)
+    print(f"Receivables check        : {'PASS' if not result.problems else 'FAIL'}")
+    for problem in result.problems:
+        print(f"   FAIL  {problem}")
+    print(f"Receivables report       : {result.report_path}")
+    print("Input files were not moved (report type 3 never moves files; reports 1-2 were not run).")
+    print(f"RUN RESULT               : {'SUCCEEDED - report written, re-opened and verified' if result.succeeded else 'COMPLETED WITH PROBLEMS - see FAIL lines'}")
+    print(line)
+
+
+class _NoInput(Exception):
+    """A needed input file is not in the input folder."""
+
+
+def _choose_one(kind: str, flag: str, found: list[Path], interactive: bool, input_fn: Callable[[str], str]) -> Path:
+    """The single file of ``found``; with several, the user chooses by number (never at random), or - not
+    interactive - the run stops listing them."""
+    if len(found) == 1:
+        return found[0]
+    names = "\n".join(f"   {i}. {path.name}" for i, path in enumerate(found, start=1))
+    if not interactive:
+        raise ConfigError(f"{len(found)} {kind} files in the input folder - choose one with {flag}:\n{names}")
+    print(f"{len(found)} {kind} files were found in the input folder:\n{names}")
+    while True:
+        try:
+            choice = input_fn(f"Which {kind} file (1-{len(found)})? ").strip()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise ConfigError(f"Cancelled: no {kind} file chosen") from exc
+        if choice.isdigit() and 1 <= int(choice) <= len(found):
+            return found[int(choice) - 1]
+        print(f"  Invalid choice: '{choice}' - enter a number from 1 to {len(found)}.")
+
+
+def run_receivables_task(args: argparse.Namespace, input_dir: Path, interactive: bool,
+                         input_fn: Callable[[str], str]) -> int:
+    """Task 5 option 3 (Receivables Update): its two files come from the project input folder (the folder every
+    task uses), recognised by their structure - a Task 5 sales CSV and a receivables workbook - unless given with
+    --sales-csv / --receivables; no path is asked. Several candidates: the user chooses (never at random). Nothing in
+    the folder is renamed, moved or deleted; options 1-2 never run."""
+    from sales_etl import receivables
+
+    try:
+        main_data = analysis.load_main_data(args.main_data or analysis.find_main_data())
+        fixed_codes = analysis.load_fixed_codes(main_data.path.parent / analysis.FIXED_CODES_NAME)
+        config = PipelineConfig(input_dir=input_dir, output_dir=args.output_dir, reference_date=date.today(),
+                                forced_encoding=args.encoding, forced_delimiter=_delimiter(args.delimiter)).validated()
+        given_sales = _file_arg_or_ask(args.sales_csv, "--sales-csv", "", (".csv",), False, input_fn) \
+            if args.sales_csv is not None else None
+        given_recv = _file_arg_or_ask(args.receivables, "--receivables", "", (".xlsx", ".xlsm"), False, input_fn) \
+            if args.receivables is not None else None
+        scan = receivables.find_inputs(input_dir, config) if given_sales is None or given_recv is None else None
+        if scan is not None:
+            print(f"Input folder             : {input_dir}")
+            missing = []
+            if given_sales is None and not scan.sales:
+                missing.append(f"no Sales CSV (a .csv file with the Task 5 columns العميل, نوع المستند, صافى)")
+            if given_recv is None and not scan.receivables:
+                missing.append(f"no receivables Excel file (a .xlsx with the columns {receivables.COL_CODE}, "
+                               f"{receivables.COL_OLD}, {receivables.COL_NEW})")
+            if missing:
+                ignored = "".join(f"\n   ignored: {path.name} - {reason}" for path, reason in scan.ignored)
+                raise _NoInput(f"the input folder {input_dir} has " + " and ".join(missing) + ignored)
+        sales_csv = given_sales or _choose_one("Sales CSV", "--sales-csv", scan.sales, interactive, input_fn)
+        recv = given_recv or _choose_one("receivables Excel", "--receivables", scan.receivables, interactive, input_fn)
+        print(f"Sales CSV (found)        : {sales_csv.name}")
+        print(f"Receivables (found)      : {recv.name}")
+    except _NoInput as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("Put the missing file in the input folder (nothing was written, moved or changed).", file=sys.stderr)
+        return EXIT_NO_INPUT
+    except (ConfigError, analysis.MainDataError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        fixed_path = main_data.path.parent / analysis.FIXED_CODES_NAME
+        result = receivables.run_receivables_update(config, sales_csv, recv, main_data, fixed_codes=fixed_codes,
+                                                    fixed_customers=fixed_customers.load_fixed_customers(fixed_path),
+                                                    fixed_path=fixed_path)
+    except receivables.ReceivablesError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("No receivables report was written; no file was moved or changed.", file=sys.stderr)
+        return EXIT_AUDIT_FAILED
+    except Exception as exc:  # noqa: BLE001 - report the failure, nothing is moved
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_AUDIT_FAILED
+    print_receivables_summary(result)
+    return EXIT_OK if result.succeeded else EXIT_AUDIT_FAILED
 
 
 def run_analysis_task(args: argparse.Namespace, input_dir: Path, interactive: bool,
@@ -741,6 +937,16 @@ def run_analysis_task(args: argparse.Namespace, input_dir: Path, interactive: bo
                 report_type = ask_report_type(input_fn)
             else:
                 raise ConfigError("--report-type is required for task 5 in non-interactive mode")
+        if report_type == REPORT_RECEIVABLES:
+            if args.ref_date is not None:
+                raise ConfigError("report type 3 (Receivables Update) takes no date")
+            return run_receivables_task(args, input_dir, interactive, input_fn)
+        if args.sales_csv is not None or args.receivables is not None:
+            raise ConfigError("--sales-csv and --receivables belong to report type 3 (Receivables Update)")
+        if args.collection_dir is not None and report_type != "1":
+            raise ConfigError("--collection-dir belongs to report type 1 (Yesterday & Previous Days)")
+        # option 1 only: report 3 reads the current collection workbook of this folder on every run
+        collection_dir = (args.collection_dir or DEFAULT_COLLECTION_DIR) if report_type == "1" else None
         reference_date = None
         if report_type == "1":
             reference_date = _date_arg_or_ask(args.ref_date, "--ref-date", YESTERDAY_PROMPT, interactive, input_fn)
@@ -750,6 +956,7 @@ def run_analysis_task(args: argparse.Namespace, input_dir: Path, interactive: bo
         mode = analysis.MODE_YESTERDAY if report_type == "1" else analysis.MODE_ALL
         main_data = analysis.load_main_data(args.main_data or analysis.find_main_data())
         fixed_codes = analysis.load_fixed_codes(main_data.path.parent / analysis.FIXED_CODES_NAME)
+        fixed_list = fixed_customers.load_fixed_customers(main_data.path.parent / analysis.FIXED_CODES_NAME)
         config = PipelineConfig(  # reference_date is only used through ``reference_date`` above
             input_dir=input_dir, output_dir=args.output_dir, reference_date=reference_date or date.today(),
             forced_encoding=args.encoding, forced_delimiter=_delimiter(args.delimiter),
@@ -771,13 +978,14 @@ def run_analysis_task(args: argparse.Namespace, input_dir: Path, interactive: bo
 
     line = "=" * 72
     if files_config is None:
-        result = analysis.run_analysis(config, mode, reference_date, main_data, fixed_codes=fixed_codes)
+        result = analysis.run_analysis(config, mode, reference_date, main_data, fixed_codes=fixed_codes,
+                                       fixed_customers=fixed_list, collection_dir=collection_dir)
         if not result.files:
             print(line)
             print("RUN RESULT               : NO REPORT - there were no CSV files in the input folder")
             print(line)
             return EXIT_NO_INPUT
-        problems = analysis.verify_analysis_report(result)
+        problems = analysis.verify_task5(result)
         print_analysis_summary(result, problems)
         print("Input files were not moved (--no-move).")
         ok = result.complete and not problems
@@ -787,7 +995,8 @@ def run_analysis_task(args: argparse.Namespace, input_dir: Path, interactive: bo
 
     try:
         run = analysis.run_analysis_managed(config, mode, reference_date, main_data, files_config,
-                                            fixed_codes=fixed_codes)
+                                            fixed_codes=fixed_codes, fixed_customers=fixed_list,
+                                            collection_dir=collection_dir)
     except RunLockedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return EXIT_USAGE

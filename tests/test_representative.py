@@ -86,7 +86,7 @@ def test_same_code_with_different_names_is_one_row_and_reported(tmp_path, capsys
     assert "WARNING code 5 has 2 names" in capsys.readouterr().out
 
 
-def test_real_branch_a_content_net_equals_erp_footer(tmp_path):
+def test_synthetic_branch_a_content_net_equals_erp_footer(tmp_path):
     write_erp_csv(tmp_path / "input" / "branch_a.csv", branch_a_rows(), footer_net=D("2434046.23"), footer_count=235)
     result = run_representative_totals(_config(tmp_path))
     assert sum((g.net for g in result.groups.values()), D(0)) == D("2434046.23")

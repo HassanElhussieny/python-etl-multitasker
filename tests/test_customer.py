@@ -70,8 +70,8 @@ def test_each_customer_once_across_files(tmp_path):
     assert [r[0] for r in rows[1:]] == ["400100"] and rows[1][2:] == [301.3, -30, 271.3]
 
 
-def test_real_branch_a_content_net_equals_erp_footer(tmp_path):
-    """All 235 real transactions: the sum of every customer's net = the file's ERP صافى footer."""
+def test_synthetic_branch_a_content_net_equals_erp_footer(tmp_path):
+    """All 235 synthetic transactions: the sum of every customer's net = the file's ERP صافى footer."""
     write_erp_csv(tmp_path / "input" / "branch_a.csv", branch_a_rows(), footer_net=D("2434046.23"), footer_count=235)
     result = run_customer_totals(_config(tmp_path))
     assert sum((c.net for c in result.groups.values()), D(0)) == D("2434046.23")

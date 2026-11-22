@@ -1,8 +1,86 @@
-# sales_etl — Daily Sales & Returns ETL
+# Python ETL Multitasker
 
-Processes a folder of ERP CSV exports (Arabic columns) using **one** user-supplied
-*Reference Yesterday Date* and produces an Excel report (three total columns + the five business columns) with a Grand Total,
-plus a verifiable reconciliation audit.
+A desktop ETL and reporting application for Arabic ERP sales exports. It reads the ERP's CSV files (Arabic columns,
+UTF-8 or cp1256; `;`, `,`, tab or `|` delimited), cleans and normalises them, and produces verified Excel reports: daily and
+period sales/returns, per-customer and per-representative totals, monthly customer analyses, and a sector &
+representative analysis with collection and receivables data.
+
+It is a complete application, not a set of scripts:
+
+- **ETL engine** (`sales_etl/`): ingestion with encoding/delimiter detection, row-level validation and rejection,
+  `Decimal` money arithmetic, seven report tasks (Task 5 with several report options), and an independent **reconciliation audit** after every report
+  (totals re-derived from the raw cells and from the saved workbook, compared against the ERP's own footer).
+- **Safe file lifecycle**: a global lock, a journal per task, reports that never overwrite an existing file, and verified moves of the inputs to
+  `processed/` or `failures/` only after the report is saved and re-checked (or `--no-move` to only read).
+- **Desktop GUI** (`gui/`, PySide6, right-to-left Arabic interface): choose a task, pick files from anywhere, run, and
+  download the reports; plus report browser, run history, live execution log and settings.
+- **Tests**: about 590 automated tests (engine, reconciliation, file lifecycle and GUI), all on synthetic data, and a
+  built-in practical self-test of the desktop window that also runs inside the packaged `.exe`.
+
+**Tech stack:** Python 3.10+ · pandas · openpyxl · PySide6 (Qt 6) · pytest · PyInstaller.
+
+## Quick start
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-gui.txt
+python -m gui            # the desktop application
+python -m sales_etl      # the command line (interactive task menu)
+python -m pytest         # the test suite
+```
+
+| Folder | Content |
+|---|---|
+| `sales_etl/` | the ETL engine and the command line (`python -m sales_etl`) |
+| `gui/` | the desktop application: `pages/`, `widgets/`, `services/` (jobs, staging, history, settings), `windows/` |
+| `config/` | `business.example.json`: synthetic business configuration (see below) |
+| `tests/` | engine tests; `tests/gui/` GUI tests; `tests/data/` synthetic fixtures |
+| `tools/` | PyInstaller spec, `build_exe.ps1`, `create_shortcut.ps1`, icon generator |
+
+Runtime folders (`input/`, `output/`, `processed/`, `failures/`, `state/`, `data/`) are created locally and are never
+committed: they hold business data.
+
+## Business configuration
+
+Company-specific values (customer sectors, the representatives and their Cover groups, customer targets, the
+responsibles of the customer report) are data, not code. `sales_etl/business.py` reads them from, in order:
+
+1. the file named by the environment variable `SALES_ETL_BUSINESS_CONFIG`;
+2. `config/business.local.json` - the real values, kept only on the production machine (git-ignored);
+3. `config/business.example.json` - fictional example values shipped with the repository.
+
+To use the application with real data, copy `config/business.example.json` to `config/business.local.json` and
+replace the names and targets. The test suite always uses the synthetic example.
+
+## Original specification
+
+The sections below document every task and report in detail (the engine was first built as `sales_etl`, a daily
+sales & returns ETL): it processes a folder of ERP CSV exports using **one** user-supplied *Reference Yesterday
+Date* and produces an Excel report (three total columns + the five business columns) with a Grand Total, plus a
+verifiable reconciliation audit.
+
+## Desktop application (Python ETL Multitasker)
+
+A second interface for the same engine. The command line above is unchanged and keeps working.
+
+- **Open:** the desktop shortcut **Python ETL Multitasker**, or double-click `Python ETL Multitasker.pyw`,
+  or `python -m gui`. Packaged: `dist\Python ETL Multitasker\Python ETL Multitasker.exe`
+  (build with `tools\build_exe.ps1`; shortcut with `tools\create_shortcut.ps1`).
+- **Workflow:** choose ONE task → «اختيار الملف» (one or more CSV files from any folder; Task 5 option 3 also its
+  receivables workbook) → «تشغيل التقرير» → «تحميل التقرير» (Save As: a copy where you choose). The report also
+  stays in the normal `output` folder.
+- **One engine:** the chosen files are COPIED into a fresh staging folder
+  (`%TEMP%\PythonETLMultitasker\staging\run_…`) and the existing command line runs on it:
+  `python -m sales_etl --task … --input-dir <staging> --output-dir <output> --no-move --non-interactive`
+  (shown in «عرض السجل»). The originals are only read (SHA-256 checked before/after); the project's `input`,
+  `processed`, `failures` and `state` folders are not used; the staged copies are deleted after the run. A run
+  waits while `state\etl.lock` is held (e.g. a terminal run is moving files).
+- **Pages:** تشغيل تقرير (the main screen) · التقارير · السجل (output folders + journals + manifests) ·
+  سجل التنفيذ (logs) · الإعدادات (output folder, collection folder, optional Main Data file, Python).
+- **Settings** are stored in `%APPDATA%\PythonETLMultitasker\settings.json`. Code: `gui/`; tests: `tests/gui/`.
+- **Self-test** (source or packaged .exe): `"Python ETL Multitasker.exe" --self-test report.json --sandbox <dir>
+  [--sample-csv <file.csv>]` opens the real window, goes through every page and button and writes a JSON report.
+  It only reads the configured folders; "open" actions are recorded, not launched; the mock task, saved settings
+  and the optional sample engine run stay inside the sandbox.
 
 ## Setup
 
@@ -154,7 +232,7 @@ returns-only).
 **Master Data** (in the second workbook) lists every transaction counted in the amounts, one row each, in
 file and line order (ready for filters and Pivot Tables): التاريخ، المندوب، القطاع، كود العميل، اسم العميل،
 المبيعات، الصافي، المرتجعات، حالة كود العميل; then `الإجمالي العام` (outside the filter, no serial
-number): the distinct representatives under المندوب (named representatives: not `غير مسجل` / `غير محدد`), the
+number): the distinct representatives under المندوب (real names: not `غير مسجل` / `غير محدد`), the
 distinct customer codes under كود العميل (every code, returns-only ones included; blank codes not
 counted), and the sums of المبيعات، الصافي، المرتجعات (net = sales + returns). Each representative
 sheet has the same الإجمالي العام of its own rows, also when it has none. المندوب and القطاع come from Main Data by the
@@ -211,7 +289,10 @@ In Cover, the customers inside / outside the 224 list are the customers with a s
 minus sign: 500,000 + -25,000 = 475,000). In `الإجمالي العام` the amounts are the column sums and the
 customer counts are distinct over the whole report.
 
-**هدف العملاء** is fixed per representative (`COVER_TARGETS`; fictional example values in the public repository; never derived from the data). A row without a target (`اون لاين`, `الاداره`, `غير مسجل`, a new name) shows
+**هدف العملاء** is fixed per representative in the business configuration (`cover_targets` in
+`config/business.local.json`, see [Business configuration](#business-configuration); never derived from the data).
+With the synthetic example configuration: المباشر 169، الوكلاء 20، الإجمالي 189. A row without a target (`اون لاين`,
+`الاداره`, `غير مسجل`, a new name) shows
 `لا يوجد هدف` and `—` as its percentage. **نسبة تحقيق هدف العملاء** = customers inside the 224 list ÷
 target (stored as a fraction, shown as `0.00%`: 10 ÷ 30 = 33.33%; no division by zero). For a subtotal
 and `الإجمالي العام` it is the sum of the inside customers of the representatives that have a target ÷
@@ -248,6 +329,110 @@ rows); `الإجمالي العام` counts the distinct customers of the whole 
 grey bold header, black borders, light-grey stripes, subtotals grey with a strong border,
 `الإجمالي العام` larger and taller with a double border; A4 landscape, black-and-white printing, one
 page wide (one page high up to 25 rows), rows 1-2 repeated.
+
+**Task 5 option 3: Receivables Update** (menu 5 then 3, or `--task 5 --report-type 3`) takes its two files from
+the project input folder - the one every task uses (`input/`, or `--input-dir`) - with no path asked: the Sales CSV
+is the .csv that reads as a Task 5 sales file (same reading rules; columns العميل, نوع المستند, صافى) and the
+receivables file is the .xlsx / .xlsm with the receivables header - recognised by structure, never by name (other
+files are listed as ignored, ~$ lock files skipped). A missing file stops the run naming it; with several
+candidates the user chooses by number (non-interactive: the run stops listing them; `--sales-csv` /
+`--receivables` choose explicitly). Nothing in the folder is renamed, moved or deleted. It is an independent workflow (`sales_etl/receivables.py`, tests
+`tests/test_receivables.py`): it never runs options 1-2, never writes their reports, never moves a file and keeps
+no journal. It reads one Sales CSV with Task 5's reading rules (every transaction, Main Data for the
+representative, the excluded representative left out) and the receivables workbook: the first sheet whose header
+row (within the first 15 rows) names `كود العميل` (it must be column B), `المستحق 7-10` and `المستحق الجديد`
+exactly; rows without a code (totals, notes) are skipped; an unreadable amount, a formula without a saved value or
+a repeated code stops the run with the codes and rows (nothing summed or chosen). It writes
+`output/Task5_Receivables_<stamp>/Representatives_Receivables_Update_<run date>.xlsx`:
+
+- `Cover`: one row per representative in Task 5's Cover order and groups (with `إجمالي المباشر` / `إجمالي الوكلاء`
+  / third-group subtotals), then `الإجمالي العام`: اسم المندوب، الشهر الأعلى قيمة (column C of `fixed code.xlsx`,
+  summed over the representative's customers in the report)، إجمالي المبيعات / المرتجعات خلال الشهر، إجمالي
+  الصافي، عملاء داخل / خارج الـ224 حققوا مبيعات (distinct customer codes whose sales are above zero - never by net,
+  zero sales and returns only do not count; distinct over all representatives in the total)، إجمالي المستحق 7-10،
+  إجمالي المستحق الجديد. No count of listed customers, no target column;
+- `Master Data`: one row per customer code - م، كود العميل، اسم العميل (first CSV name)، المندوب، القطاع (Main
+  Data)، عدد الحركات، أول تاريخ، آخر تاريخ، المبيعات، المرتجعات، الصافي (summed, signs kept)، داخل قائمة الـ224 / خارج قائمة الـ224 (`نعم` in exactly one)، المستحق
+  7-10، المستحق الجديد (looked up by code, once; empty and noted `غير موجود في ملف المستحقات` when the code is not in
+  the file)، ملاحظة المستحقات - then `الإجمالي العام`;
+- one sheet per Task 5 representative (also without customers) with its customers once each and its total;
+- `تفاصيل الحركات`: the original transactions (Task 5's Master Data layout).
+
+The workbook is re-opened and checked cell by cell, then reconciled from the raw CSV cells and a second reading of
+the receivables workbook (codes in the CSV, found, not found, duplicates, the file's matched totals = Master Data
+= the representative sheets = Cover, sales / returns / net and the transaction count = the CSV, every customer once).
+
+**Task 5 = one task, three reports**, built in one run and folder, each checked on its own:
+
+| Step | Report | Code | Check |
+|---|---|---|---|
+| 1 | `تقرير تحليل المبيعات والمرتجعات.xlsx` | `analysis.write_analysis_report` | `analysis.verify_analysis_report` + `reconcile` |
+| 2 | `Representatives_Analysis_<run date>.xlsx` | `analysis.write_reps_report` | (same check, `verify_reps_report`) |
+| 3 | `Fixed_Customers_Report_<run date>.xlsx` | module `sales_etl/fixed_customers.py`: `load_fixed_customers`, `build_customers_report` | `fixed_customers.verify_customers_report` + `reconcile_customers` |
+
+`analysis.run_analysis` writes reports 1, 2 and then 3 (report 3 only reads the result, so reports 1-2 never
+change; a failure while writing report 3 is recorded as report 3's problem, reports 1-2 stay). `analysis.verify_task5`
+checks reports 1-2, then report 3, and keeps both results apart; the terminal shows `Reconciliation` (reports 1-2)
+and `Customer report check` (report 3) on separate lines. Input files move only when all three pass. Tests:
+`tests/test_analysis.py` (reports 1-2) and `tests/test_fixed_customers.py` (report 3).
+
+**Third workbook: `Fixed_Customers_Report_<run date>.xlsx`** (beside the other two, one sheet
+`تقرير عملاء الـ224`), independent of them (they are written exactly as before):
+
+- Source list: `fixed code.xlsx` (next to Main Data, read only, never written): the header must be
+  `كود العميل | اسم العميل | الشهر الاعلي قيمه | المسئول` (columns A-D); every customer in the file's order,
+  its name, its value of the highest month (column C, a number, shown as stored) and its المسؤول (column D, as
+  written - also where Main Data names another representative). A missing or repeated code stops the run.
+- Columns: كود العميل، اسم العميل، الشهر الأعلى قيمة، اسم المسؤول عن العميل، مبيعات شهر <month>، مرتجعات شهر
+  <month>، صافي شهر <month>، عملاء داخل قائمة الـ224، عملاء خارج قائمة الـ224 (`نعم` in exactly one of the
+  two, the other empty), then `الإجمالي العام`.
+- **Fourth workbook (option 1 only): `Customers_Not_Worked_<Month>_<year>.xlsx`** (module
+  `sales_etl/not_worked.py`, written after report 3 from its rows, which it only reads): the customers of
+  report 3 whose sales of the month are exactly 0 (also with returns; الشهر الأعلى قيمة never decides), one
+  sheet per المسؤول - report 3's sheets, names and order, also a person without such a customer - with the
+  same 11 columns and values, then one `الإجمالي العام` row (as below). Checked cell by cell and against a
+  recount from the raw source cells and the collection workbook; not written when report 3 is not.
+- Every المسؤول sheet: one `الإجمالي العام` row right below its customer rows (label in اسم العميل; كود العميل
+  and اسم المسؤول empty), from that sheet's customer rows only: the sums of الشهر الأعلى قيمة, sales, returns
+  (signed), net, المستحق 7-10 and المستحق الجديد, and the distinct codes marked `نعم` in داخل / خارج قائمة
+  الـ224. The main sheet's total row and the blocks are unchanged; checked against an independent recount.
+- Option 1 (Yesterday & Previous Days) only: two more columns at the end, `المستحق 7-10` and
+  `المستحق الجديد`, on the main sheet and every المسؤول sheet (their totals in `الإجمالي العام` and in the
+  block). Source: the single Excel workbook of the `التحصيل` folder in the project root (any file name;
+  `--collection-dir` chooses another folder), read again on every run, never written or moved: the sheet whose
+  header row names `كود العميل` (column B), `المستحق 7-10` (column F) and `المستحق الجديد` (column L). Matched
+  by customer code (leading zeros fold, as everywhere in Task 5); a customer not in the workbook, or an empty
+  cell, stays empty (never 0). A missing or empty folder, more than one workbook, an unreadable file, a
+  missing sheet / column, a column not in F / L or a repeated code stops this step: report 3 is not written,
+  it is reported as FAIL and no input file moves (reports 1-2 are written as before). Option 2 is unchanged.
+  Checked by a second, independent reading of the workbook (every row's values, the totals, the file unchanged).
+- Period, always from the report date entered, never today's date: yesterday report = the 1st of the
+  reference date's month up to the reference date (16/11/2026 -> 01/11 - 16/11; 05/12/2026 -> 01/12 -
+  05/12); all transactions = all of the latest month with transactions in the input files (named in the
+  title). Earlier months and later days are never counted.
+- Amounts per customer code (never by name) from the counted transactions: sales, returns with their
+  minus sign, net = sales + returns. Every fixed customer is shown (zeros without activity); after them,
+  by code, every other customer code with a transaction in the period: its CSV name (column G), its Main
+  Data representative as المسؤول (`غير محدد` when blank, `غير مسجل` when the code is not in Main Data).
+  The excluded representative's customers are left out as everywhere in Task 5.
+- Checked before any file moves: the saved workbook cell by cell, and a reconciliation from the raw
+  source cells (period, every fixed customer once and in order with its own values, the others once,
+  classification, المسؤول, every customer's sales / returns, net, الإجمالي العام = the source rows and the
+  period's Master Data totals).
+- Same black-and-white design and print setup as `تقرير تحليل المبيعات والمرتجعات` (A4 landscape, one page
+  wide, further pages down, rows 1-2 repeated), filter, frozen header, `#,##0.00` amounts.
+- Under the main sheet's rows, a `الإجمالي العام` block (its own header row): total customers (distinct codes)
+  = customers inside the list + outside it, sales, returns, net, and - separately - the customers inside / outside
+  the list who sold: distinct codes whose sales of the period are above zero (never by net; returns only or zero
+  sales do not count), so the customers listed and the customers who sold are never mixed.
+- Then one sheet per المسؤول, made from the main sheet's rows: the `customer_responsibles` of the business
+  configuration (always, in this order), then every other المسؤول of the report in order of
+  appearance - no customer is dropped. A customer is on the sheet of the المسؤول in its row (column D for the
+  list, Main Data for the others), exactly once; spelling variants fold (مندوب تجريبى 10 / مندوب تجريبي 10: one sheet,
+  each row keeps its name as written), different names are never merged. Each sheet: the same 8 columns, the
+  full name in its title line, a valid sheet name, the filter on the customer rows only, and its own
+  `الإجمالي العام` block, with the sheet's المسؤول in the cell right above `الإجمالي العام` (first column of the
+  block's header row); the people's blocks add up to the main block (checked before any file moves).
 
 **Customers missing from Main Data** never stop the run, and their amounts are never dropped.
 They are counted once in the `عملاء غير مسجلين` row of both main sheets and listed per code in
@@ -626,8 +811,10 @@ python -m pytest
 
 The tests use small synthetic datasets with known totals, written in the exact ERP layout.
 
-The regression tests rebuild a 235-document export in the ERP layout (cp1256) from a local fixture file
-(not part of the repository) and check every total against its footer.
+`tests/data/branch_a_compact.txt` is a **synthetic** 235-document export (fictional codes, documents and
+amounts, generated by `tests/data/make_synthetic_branch.py`). The regression tests rebuild it as a cp1256
+ERP file and check every total against its footer (235 documents, `صافى` 2,434,046.23).
+Representative names and targets in the tests come from `config/business.example.json` (fictional).
 
 ## Code layout
 

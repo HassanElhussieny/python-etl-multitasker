@@ -1,4 +1,5 @@
-"""Regression test on the real branch_a.csv content (rebuilt in its original ERP layout, cp1256).
+"""Regression test on a synthetic 235-document export (tests/data/branch_a_compact.txt, fictional values) rebuilt in
+the ERP layout (cp1256).
 
 Expected values were computed independently (awk over the transcription) and the
 transcription itself reconciles with the original file's footer:
@@ -35,7 +36,7 @@ def test_branch_a_reference_08_10_2026(run, tmp_path):
 
 
 def test_real_erp_footer_labels_are_control_totals(run, tmp_path):
-    """The real export prints 'عدد الفواتير' / 'إجمالى عام' (seen in branch_a.csv and branch_b.csv)."""
+    """The ERP export prints 'عدد الفواتير' / 'إجمالى عام' (seen in branch_a.csv and branch_b.csv)."""
     write_erp_csv(tmp_path / "input" / "branch_a.csv", branch_a_rows(), footer_net=FOOTER_NET,
                   footer_count=235, footer_labels=("عدد الفواتير", "إجمالى عام"))
     result = run("18/10/2026")

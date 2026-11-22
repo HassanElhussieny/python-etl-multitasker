@@ -45,7 +45,7 @@ from sales_etl.analysis import (
 )
 from sales_etl.cli import EXIT_AUDIT_FAILED, EXIT_NO_INPUT, EXIT_OK, EXIT_USAGE, main
 from sales_etl.config import PipelineConfig
-from tests.conftest import S, R, branch_a_rows, write_erp_csv
+from tests.conftest import write_collection, S, R, branch_a_rows, write_erp_csv
 
 D = Decimal
 WRONG_REP = ("99", "مندوب من الملف")   # CSV columns I/J: must never be used by task 5
@@ -158,9 +158,11 @@ def _returns_only(rows):
 
 
 def write_fixed(path, codes):
+    """fixed code.xlsx as the real file: the header, then A code, B name, C الشهر الاعلي قيمه, D المسئول."""
     wb = Workbook()
+    wb.active.append(["كود العميل", "اسم العميل", "الشهر الاعلي قيمه ", "المسئول"])
     for code in codes:
-        wb.active.append([code])
+        wb.active.append([code, f"عميل القائمة {code}", 1000, "مندوب تجريبي 01"])
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return path
@@ -170,6 +172,7 @@ def write_fixed(path, codes):
 def setup(tmp_path):
     write_erp_csv(tmp_path / "input" / "month.csv", ROWS)
     write_fixed(tmp_path / "data" / FIXED_CODES_NAME, [100001, 555555, 100003])
+    write_collection(tmp_path / "التحصيل" / "collection.xlsx", [(100001, 10, 20)])   # option 1 via the command
     return load_main_data(write_main(tmp_path / "data" / "main.xlsx"))
 
 
@@ -223,8 +226,8 @@ def test_decimal_precision(tmp_path):
     assert result.sectors["الجملة"].sales == D("1.00") and result.direct.net == D("1.00")
 
 
-def test_real_branch_a_content_reconciles_with_erp_footer(tmp_path):
-    """All 235 real transactions are unregistered here: the grand net must equal the ERP footer."""
+def test_synthetic_branch_a_content_reconciles_with_erp_footer(tmp_path):
+    """All 235 synthetic transactions are unregistered here: the grand net must equal the ERP footer."""
     write_erp_csv(tmp_path / "input" / "branch_a.csv", branch_a_rows(), footer_net=D("2434046.23"), footer_count=235)
     result = run_analysis(_config(tmp_path), MODE_ALL, None, load_main_data(write_main(tmp_path / "main.xlsx")))
     assert result.direct.net == D("2434046.23") and analysis.verify_analysis_report(result) == []
@@ -530,7 +533,7 @@ def test_menu_option_1_asks_date(tmp_path, setup, capsys):
 
 
 def test_menu_option_2_asks_no_date(tmp_path, setup):
-    code, asked = _cli(tmp_path, ["5", "3", "x", "2"], "--no-move")
+    code, asked = _cli(tmp_path, ["5", "4", "x", "2"], "--no-move")                 # 4: not a report type
     assert code == EXIT_OK and asked == ["Select task number: ", *["Select report type: "] * 3]
     (report,) = (tmp_path / "out").glob(f"Task5_*/{WORKBOOK_NAME}")
     assert _sheets(report)[SHEET_SECTORS][0] == ["قطاع العملاء", *ALL_COLUMNS, *ALL_COUNT_COLUMNS]
@@ -676,7 +679,11 @@ def test_load_fixed_codes_ignores_blanks_and_repeats(tmp_path):
     assert load_fixed_codes(tmp_path / FIXED_CODES_NAME) == {"100001", "100002", "A12", "555555"}
     with pytest.raises(MainDataError, match="cannot open"):
         load_fixed_codes(tmp_path / "missing.xlsx")
-    write_fixed(tmp_path / "empty" / FIXED_CODES_NAME, [None, ""])
+    empty = Workbook()                                                       # only blank cells in column A
+    for v in (None, ""):
+        empty.active.append([v])
+    (tmp_path / "empty").mkdir()
+    empty.save(tmp_path / "empty" / FIXED_CODES_NAME)
     with pytest.raises(MainDataError, match="no codes"):
         load_fixed_codes(tmp_path / "empty" / FIXED_CODES_NAME)
 
@@ -1235,9 +1242,10 @@ def test_both_workbooks_are_verified_before_any_file_moves(tmp_path, setup, monk
     assert _run(tmp_path) == EXIT_AUDIT_FAILED
     assert [p.name for p in (tmp_path / "input").iterdir()] == ["month.csv"]
     monkeypatch.undo()
-    assert _run(tmp_path) == EXIT_OK                                            # the same file, both workbooks verified
+    assert _run(tmp_path) == EXIT_OK                                            # the same file, all workbooks verified
     reports = sorted(p.name for p in (tmp_path / "out").rglob("*.xlsx"))
-    assert len(reports) == 4 and sum(n.startswith("Representatives_Analysis_") for n in reports) == 2
+    assert len(reports) == 6 and sum(n.startswith("Representatives_Analysis_") for n in reports) == 2
+    assert sum(n.startswith("Fixed_Customers_Report_") for n in reports) == 2   # the third workbook, each run
     assert [p.name for p in (tmp_path / "processed").rglob("*.csv")] == ["month.csv"]
 
 
@@ -1323,13 +1331,14 @@ def test_long_unregistered_list_is_not_squeezed_onto_one_page(tmp_path):
     assert ws.max_row == 43 and ws.page_setup.fitToHeight == 0 and ws.page_setup.fitToWidth == 1
 
 
-def _content_width(ws, col):
-    """The narrowest column that still shows every body value of ``col`` and the longest header word whole."""
+def _content_width(ws, col, last=None):
+    """The narrowest column that still shows every body value of ``col`` (rows 3 to ``last``) and the longest
+    header word whole."""
     def shown(v):
         if isinstance(v, (int, float)):
             return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
         return str(v or "")
-    body = max((len(shown(ws.cell(row=r, column=col).value)) for r in range(3, ws.max_row + 1)
+    body = max((len(shown(ws.cell(row=r, column=col).value)) for r in range(3, (last or ws.max_row) + 1)
                 if ws.cell(row=r, column=col).value is not None), default=0)
     word = max((len(w) for w in str(ws.cell(row=2, column=col).value or "").split()), default=0)
     return max(body, word) + 1
@@ -2081,11 +2090,11 @@ def _cover_raw(path):
     return {r[1]: list(r[1:]) for r in ws.iter_rows(min_row=3, values_only=True)}
 
 
-def test_cover_targets_are_the_fixed_business_targets():
-    expected = {"مندوب تجريبي 09": 20, "مندوب تجريبي 01": 30, "مندوب تجريبي 02": 40,
+def test_cover_targets_are_the_configured_business_targets():
+    expected = {"مندوب تجريبي 08": 20, "مندوب تجريبي 09": 20, "مندوب تجريبي 01": 30, "مندوب تجريبي 02": 40,
                 "مندوب تجريبي 11": 20, "مندوب تجريبي 10": 15, "مندوب مباشر تجريبي": 4, "مندوب تجريبي 12": 20,
                 "مندوب تجريبي 03": 3, "مندوب تجريبي 04": 5, "مندوب تجريبي 05": 2, "مندوب تجريبي 06": 3,
-                "مندوب تجريبي 07": 2, "مندوب تجريبي 14": 3, "مندوب تجريبي 15": 2, "مندوب تجريبي 08": 20}
+                "مندوب تجريبي 07": 2, "مندوب تجريبي 14": 3, "مندوب تجريبي 15": 2}   # config/business.example.json
     assert analysis.COVER_TARGETS == expected
     for name, target in expected.items():
         assert analysis.cover_target(name) == target

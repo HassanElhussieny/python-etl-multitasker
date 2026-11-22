@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -11,13 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from sales_etl.config import PipelineConfig
-from sales_etl.pipeline import run_pipeline
+# Tests always use the synthetic business configuration (fictional names/targets), never a local real one.
+os.environ["SALES_ETL_BUSINESS_CONFIG"] = str(Path(__file__).resolve().parents[1] / "config" / "business.example.json")
 
-FIXTURES = Path(__file__).parent / "fixtures"
+from sales_etl.config import PipelineConfig  # noqa: E402
+from sales_etl.pipeline import run_pipeline  # noqa: E402
+
+SYNTHETIC_DATA = Path(__file__).parent / "data"      # synthetic fixtures only
 S, R = "مبيعات", "مرتجعات"
 
-# Header exactly as in branch_a.csv: 21 cells, blank headers at 4, 7, 10 and 21.
+# Header exactly as in the ERP export: 21 cells, blank headers at 4, 7, 10 and 21.
 ERP_HEADER = [
     "التاريخ", "نوع المستند", "رقم المستند", "", "بيان", "العميل", "", " الحساب الفرعي",
     "المندوب", "", "اجمالى", "خصم 1", "خصم صيدلى", "خصم موزع", "خصم نقدى", "ض.قيمة مضا",
@@ -105,9 +109,9 @@ def write_erp_csv(path: Path, rows: list[Txn | list[str]], *, encoding: str = "c
 
 
 def branch_a_rows() -> list[Txn]:
-    """The 235 transactions of branch_a.csv (numeric content verified against its footer)."""
+    """The 235 SYNTHETIC transactions of tests/data/branch_a_compact.txt (see make_synthetic_branch.py)."""
     rows = []
-    for line in (FIXTURES / "branch_a_compact.txt").read_text(encoding="utf-8").splitlines():
+    for line in (SYNTHETIC_DATA / "branch_a_compact.txt").read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
             continue
         d, t, doc, series, cust, gross, pharm, dist, cash, net = line.split("|")
@@ -140,3 +144,42 @@ def check(result, name: str, scope: str | None = None):
 
 
 REF = date(2026, 10, 8)
+
+
+# ------------------------------------------------------------------ Task 5 option 1: the collection workbook
+COLLECTION_HEADER = ["م", "كود العميل", "اسم العميل", "المندوب", "قيمة الفواتير المفتوحة", "المستحق 7-10",
+                     "المحصل من مستحق 7-10", "الشيكات المرتدة", "المرتجعات", "مصروفات وتسويات", "المتبقي من 7-10",
+                     "المستحق الجديد", "المحصل على الجديد"]
+
+
+def write_collection(path: Path, rows, header=COLLECTION_HEADER) -> Path:
+    """The real layout of التحصيل/<workbook>: title row, empty row, header on row 3 (B code, F المستحق 7-10,
+    L المستحق الجديد), the customers (code, F, L), then a total and a note row without a code."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "القديم والجديد"
+    ws.append([None, "متابعة التحصيل: القديم والجديد"])
+    ws.append([])
+    ws.append(list(header))
+    for i, (code, old, new) in enumerate(rows, start=1):
+        line = [None] * len(header)
+        line[0], line[1], line[2], line[3] = i, code, f"عميل {code}", "مندوب"
+        if len(line) > 11:
+            line[5], line[11] = old, new
+        ws.append(line)
+    ws.append([None, None, "الإجمالي"])
+    ws.append([None, None, "منها مستحق 7-10"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _no_real_collection_folder(tmp_path: Path, monkeypatch):
+    """No test ever reads the project's real التحصيل folder: the command's default points into the test's own
+    temporary folder (tmp_path / التحصيل)."""
+    from sales_etl import cli
+
+    monkeypatch.setattr(cli, "DEFAULT_COLLECTION_DIR", tmp_path / "التحصيل")

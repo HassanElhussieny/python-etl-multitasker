@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -54,6 +54,7 @@ from sales_etl.config import (
     FileManagementConfig,
     PipelineConfig,
 )
+from sales_etl.business import BUSINESS
 from sales_etl.grouped import GroupFile, GroupRunResult, _free_stamp, run_batch_managed
 from sales_etl.dates import format_dmy
 from sales_etl.ingest import discover_csv_files, read_raw_table
@@ -61,6 +62,9 @@ from sales_etl.models import ZERO, Category, FileProcessingError
 from sales_etl.normalize import parse_transactions
 from sales_etl.report import _ensure_new
 from sales_etl.text import ascii_digits, canonical, clean_cell
+
+if TYPE_CHECKING:  # report 3's module imports this one
+    from sales_etl.fixed_customers import FixedCustomer
 
 logger = logging.getLogger(__name__)
 
@@ -83,53 +87,24 @@ SHEET_PIVOT = "Pivot for Last Day"  # the selected day by representative and cus
 UNREGISTERED = "عملاء غير مسجلين"
 GRAND_TOTAL = "الإجمالي العام"
 
-SECTORS: tuple[str, ...] = (
-    "شركات شحن", "الجملة", "صيدليات وسلاسل صيدليات", "وكلاء المنطقة أ", "وكلاء المنطقة ب",
-    "مستشفيات", "محلات اطفال", "عملاء اون لاين",
-)
-REPRESENTATIVES: tuple[str, ...] = (
-    "اون لاين", "مندوب تجريبي 01", "مندوب تجريبي 02", "مندوب تجريبي 03", "مندوب تجريبي 04",
-    "مندوب تجريبي 05", "مندوب تجريبي 06", "مندوب تجريبي 07", "الاداره", "مندوب تجريبي 08",
-    "مندوب تجريبي 09", "مندوب تجريبي 10", "مندوب تجريبي 11", "مندوب تجريبي 12",
-    "مندوب تجريبي 13", "مندوب تجريبي 14", "مندوب تجريبي 15",
-)
+SECTORS: tuple[str, ...] = BUSINESS.sectors          # company data: sales_etl/business.py
+REPRESENTATIVES: tuple[str, ...] = BUSINESS.representatives
 #: Task 5 leaves this representative out of every output: her customers' transactions are not counted
 #: anywhere (the source files and Main Data are not changed)
-EXCLUDED_REPRESENTATIVE = "مندوب تجريبي 13"
+EXCLUDED_REPRESENTATIVE = BUSINESS.excluded_representative
 REPORT_REPRESENTATIVES: tuple[str, ...] = tuple(r for r in REPRESENTATIVES if r != EXCLUDED_REPRESENTATIVE)
 #: Cover order: group one, its subtotal, group two, its subtotal, then every other row of تقرير
 #: المندوبين (extra Main Data names, غير محدد, غير مسجل) with the third subtotal, then الإجمالي العام
-COVER_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("اون لاين", "الاداره", "مندوب تجريبي 08", "مندوب تجريبي 09", "مندوب تجريبي 01",
-     "مندوب تجريبي 02", "مندوب تجريبي 11", "مندوب تجريبي 10", "مندوب تجريبي 12"),
-    ("مندوب تجريبي 03", "مندوب تجريبي 04", "مندوب تجريبي 05", "مندوب تجريبي 06", "مندوب تجريبي 07",
-     "مندوب تجريبي 14", "مندوب تجريبي 15"),
-)
+COVER_GROUPS: tuple[tuple[str, ...], ...] = BUSINESS.cover_groups
 SUBTOTAL_LABELS: tuple[str, ...] = ("إجمالي المباشر", "إجمالي الوكلاء", "إجمالي المجموعة الثالثة")  # Cover
 #: a direct representative outside the fixed Main Data list: always in المباشر, as its last row (right above
 #: إجمالي المباشر) in every grouped summary - Cover, تقرير المندوبين - and in the representative sheet order
-DIRECT_ADDITION = "مندوب مباشر تجريبي"
+DIRECT_ADDITION = BUSINESS.direct_addition
 #: العملاء غير المسجلين when no unregistered customer has a non-zero amount (no fake zero total)
 NO_UNREGISTERED_NOTE = "لا يوجد عملاء غير مسجلين في بيانات هذا التقرير"
 #: هدف العملاء of each representative in Cover (fixed business targets; never derived from the data).
 #: A representative not listed here has no target: Cover shows NO_TARGET and leaves it out of the percentage.
-COVER_TARGETS: dict[str, int] = {
-    "مندوب تجريبي 08": 20,
-    "مندوب تجريبي 09": 20,
-    "مندوب تجريبي 01": 30,
-    "مندوب تجريبي 02": 40,
-    "مندوب تجريبي 11": 20,
-    "مندوب تجريبي 10": 15,
-    "مندوب مباشر تجريبي": 4,
-    "مندوب تجريبي 12": 20,
-    "مندوب تجريبي 03": 3,
-    "مندوب تجريبي 04": 5,
-    "مندوب تجريبي 05": 2,
-    "مندوب تجريبي 06": 3,
-    "مندوب تجريبي 07": 2,
-    "مندوب تجريبي 14": 3,
-    "مندوب تجريبي 15": 2,
-}
+COVER_TARGETS: dict[str, int] = BUSINESS.cover_targets
 NO_TARGET = "لا يوجد هدف"
 NO_RATIO = "—"
 PERCENT_FORMAT = "0.00%"
@@ -444,6 +419,17 @@ class AnalysisResult:
     run_dir: Path | None = None
     report_path: Path | None = None
     reps_report_path: Path | None = None  # Representatives_Analysis_<date>.xlsx
+    #: the customers of fixed code.xlsx (order kept) for the third workbook; empty: no third workbook is written
+    fixed_customers: tuple["FixedCustomer", ...] = ()
+    customers_report_path: Path | None = None  # Fixed_Customers_Report_<date>.xlsx (report 3)
+    customers_error: str | None = None          # report 3 could not be written (reports 1-2 are not affected)
+    #: option 1: the folder of the current collection workbook (None: report 3 without المستحق 7-10 / الجديد)
+    collection_dir: Path | None = None
+    collection: Any = None                      # fixed_customers.CollectionData, read by report 3 on this run
+    not_worked_path: Path | None = None         # option 1: Customers_Not_Worked_<Month>_<year>.xlsx (report 4)
+    not_worked_error: str | None = None         # report 4 could not be written (reports 1-3 are not affected)
+    report_problems: list[str] = field(default_factory=list)     # verify_task5: reports 1-2
+    customers_problems: list[str] = field(default_factory=list)  # verify_task5: report 3
 
     def __post_init__(self) -> None:
         self.sectors = {name: Amounts() for name in SECTORS}
@@ -1967,11 +1953,29 @@ def verify_analysis_report(result: AnalysisResult) -> list[str]:
     return problems + _excluded_cells(path.name, saved) + verify_reps_report(result) + reconcile(result)
 
 
+def verify_task5(result: AnalysisResult) -> list[str]:
+    """Task 5's three reports, each verified on its own: reports 1-2 (:func:`verify_analysis_report`), then report 3
+    (``fixed_customers.verify_customers_report``, when the run has the fixed list). The problems of each are kept on
+    ``result`` (``report_problems`` / ``customers_problems``); any problem means no input file moves."""
+    from sales_etl import fixed_customers  # step 3 lives in its own module (it imports this one)
+
+    result.report_problems = verify_analysis_report(result)
+    result.customers_problems = fixed_customers.verify_customers_report(result) if result.fixed_customers else []
+    from sales_etl import not_worked  # report 4 (option 1): its own module
+
+    result.customers_problems += not_worked.verify_not_worked_report(result)
+    return [*result.report_problems, *result.customers_problems]
+
+
 # ------------------------------------------------------------------ run
 def run_analysis(config: PipelineConfig, mode: str, reference_date: date | None, main_data: MainData, *,
                  now: datetime | None = None, files: list[Path] | None = None,
-                 run_dir: Path | None = None, fixed_codes: frozenset[str] = frozenset()) -> AnalysisResult:
-    """Build both workbooks from every CSV in ``config.input_dir`` (nothing is moved).
+                 run_dir: Path | None = None, fixed_codes: frozenset[str] = frozenset(),
+                 fixed_customers: Sequence[FixedCustomer] = (),
+                 collection_dir: Path | None = None) -> AnalysisResult:
+    """Build Task 5's reports from every CSV in ``config.input_dir`` (nothing is moved): 1. تقرير تحليل المبيعات
+    والمرتجعات, 2. Representatives_Analysis, 3. - with ``fixed_customers`` (fixed code.xlsx) - Fixed_Customers_Report
+    (``fixed_customers.build_customers_report``: it only reads the result, so reports 1-2 never change).
 
     ``files``/``run_dir`` let the managed lifecycle pre-select the batch and own the folder.
     No report folder is created when there are no files.
@@ -1982,7 +1986,9 @@ def run_analysis(config: PipelineConfig, mode: str, reference_date: date | None,
         raise ValueError("the yesterday report needs a date; the all-transactions report takes none")
     config = config.validated()
     result = AnalysisResult(mode=mode, reference_date=reference_date, main_data=main_data,
-                            input_dir=config.input_dir, started_at=now or datetime.now(), fixed_codes=fixed_codes)
+                            input_dir=config.input_dir, started_at=now or datetime.now(), fixed_codes=fixed_codes,
+                            fixed_customers=tuple(fixed_customers),
+                            collection_dir=collection_dir if mode == MODE_YESTERDAY else None)
     if files is None:
         files, _ = discover_csv_files(config.input_dir, recursive=config.recursive,
                                       exclude_dirs=[config.output_dir])
@@ -1993,14 +1999,24 @@ def run_analysis(config: PipelineConfig, mode: str, reference_date: date | None,
         run_dir = config.output_dir / f"{TASK_PREFIX}_{_free_stamp(config.output_dir, None, TASK_PREFIX, result.started_at)}"
         run_dir.mkdir(parents=True)
     result.run_dir = run_dir
-    result.report_path = write_analysis_report(result, run_dir / WORKBOOK_NAME)
-    result.reps_report_path = write_reps_report(result, run_dir / reps_workbook_name(result))
+    result.report_path = write_analysis_report(result, run_dir / WORKBOOK_NAME)              # report 1
+    result.reps_report_path = write_reps_report(result, run_dir / reps_workbook_name(result))  # report 2
+    if result.fixed_customers:                                                               # report 3
+        from sales_etl import fixed_customers  # its own module (it imports this one)
+
+        fixed_customers.build_customers_report(result, run_dir)
+        if mode == MODE_YESTERDAY:                                                          # report 4
+            from sales_etl import not_worked  # its own module (it reads report 3's rows only)
+
+            not_worked.build_not_worked_report(result, run_dir)
     return result
 
 
 def run_analysis_managed(config: PipelineConfig, mode: str, reference_date: date | None, main_data: MainData,
                          files_config: FileManagementConfig | None = None, *,
-                         now: datetime | None = None, fixed_codes: frozenset[str] = frozenset()) -> GroupRunResult:
+                         now: datetime | None = None, fixed_codes: frozenset[str] = frozenset(),
+                         fixed_customers: Sequence[FixedCustomer] = (),
+                         collection_dir: Path | None = None) -> GroupRunResult:
     """Build, save, re-open and reconcile the workbook; only then move the cleanly read CSV files.
 
     Same lifecycle as tasks 3 and 4 (``grouped.run_batch_managed``): ``output/Task5_<stamp>``,
@@ -2009,5 +2025,7 @@ def run_analysis_managed(config: PipelineConfig, mode: str, reference_date: date
     return run_batch_managed(
         TASK_PREFIX, JOURNAL_NAME, config, files_config,
         build=lambda files, run_dir, started: run_analysis(config, mode, reference_date, main_data, now=started,
-                                                          files=files, run_dir=run_dir, fixed_codes=fixed_codes),
-        verify=lambda result: verify_analysis_report(result), now=now)
+                                                          files=files, run_dir=run_dir, fixed_codes=fixed_codes,
+                                                          fixed_customers=fixed_customers,
+                                                          collection_dir=collection_dir),
+        verify=verify_task5, now=now)

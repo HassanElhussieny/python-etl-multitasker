@@ -105,7 +105,7 @@ def test_future_dates_are_counted(tmp_path):
     assert rows[0][-2] == "ديسمبر" and rows[1][-2:] == [1, 1]
 
 
-def test_real_branch_a_content_matches_an_independent_count(tmp_path):
+def test_synthetic_branch_a_content_matches_an_independent_count(tmp_path):
     txns = branch_a_rows()
     write_erp_csv(tmp_path / "input" / "branch_a.csv", txns)
     result = run_file_customers(_config(tmp_path))
@@ -152,7 +152,7 @@ def test_year_column_counts_each_customer_once_per_file(tmp_path):
 def test_year_column_matches_an_independent_distinct_count_of_the_file(tmp_path):
     txns = branch_a_rows()
     write_erp_csv(tmp_path / "input" / "branch_a.csv", txns)
-    write_erp_csv(tmp_path / "input" / "b.csv", [row("01-01-2026", t.customer) for t in txns[:40]])
+    write_erp_csv(tmp_path / "input" / "z.csv", [row("01-01-2026", t.customer) for t in txns[:40]])
     result = run_file_customers(_config(tmp_path))
     rows = _rows(result.report_path)
     assert rows[1][-1] == len({t.customer for t in txns})

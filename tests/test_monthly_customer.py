@@ -100,8 +100,8 @@ def test_representatives_ordered_by_date_not_by_file_name(tmp_path):
     assert verify_monthly_report(result) == []
 
 
-def test_real_branch_a_content_net_equals_erp_footer(tmp_path):
-    """All 235 real transactions: the sum of every monthly net = the file's ERP صافى footer."""
+def test_synthetic_branch_a_content_net_equals_erp_footer(tmp_path):
+    """All 235 synthetic transactions: the sum of every monthly net = the file's ERP صافى footer."""
     write_erp_csv(tmp_path / "input" / "branch_a.csv", branch_a_rows(), footer_net=D("2434046.23"), footer_count=235)
     result = run_monthly(_config(tmp_path))
     total = sum((v for r in monthly_customer.monthly_table(result) for v in r[3:]), D(0))
